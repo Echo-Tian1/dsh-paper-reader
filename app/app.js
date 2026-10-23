@@ -15,7 +15,7 @@ const FIXTURE = params.get('fixture') === '1';
 // 正式模式下所有 HTTP 请求（含页图 <img>）都必须带上这个前缀。
 const API_BASE = '/dsh-paper-reader';
 
-const BUILD = '2026-10-23T13:20';
+const BUILD = '2026-10-23T13:45';
 const els = {};
 let appEl = null;
 let uiTimer = null;
@@ -188,6 +188,39 @@ const EXPECTED_NODES = [
 function missingNodes() {
   return EXPECTED_NODES.filter((id) => !document.getElementById(id));
 }
+/**
+ * 在父窗口坐标系里对页签做命中测试：能查出「是不是有别的东西盖住了按钮」。
+ * 同源 iframe 才可用；独立打开时返回提示。
+ */
+function parentHitTest() {
+  try {
+    const frameEl = window.frameElement;
+    if (!frameEl) return '独立页面，无父窗口';
+    const frameRect = frameEl.getBoundingClientRect();
+    const parentDoc = window.parent.document;
+    const describe = (el) => {
+      if (!el) return 'null';
+      if (el === frameEl) return 'iframe(正常)';
+      const cls = typeof el.className === 'string' ? el.className.split(' ')[0] : '';
+      return `${el.tagName.toLowerCase()}${el.id ? '#' + el.id : ''}${cls ? '.' + cls : ''}`;
+    };
+    const parts = [];
+    for (const id of ['tab-current', 'tab-history', 'tab-terms', 'tab-docs']) {
+      const el = document.getElementById(id);
+      if (!el) { parts.push(`${id}:缺失`); continue; }
+      const r = el.getBoundingClientRect();
+      const hit = parentDoc.elementFromPoint(
+        frameRect.left + r.left + r.width / 2,
+        frameRect.top + r.top + r.height / 2,
+      );
+      parts.push(`${id}:${describe(hit)}`);
+    }
+    return parts.join(' ');
+  } catch (err) {
+    return `命中测试失败(${err && err.message ? err.message : err})`;
+  }
+}
+
 function wireDiagnostics() {
   window.addEventListener('error', (event) => {
     reportClientError('脚本错误', event.message || String(event.error || ''));
@@ -203,7 +236,8 @@ function wireDiagnostics() {
     brand.addEventListener('click', () => {
       const missing = missingNodes();
       const activeTab = document.querySelector('.tab.active')?.id || 'none';
-      toast(`构建 ${BUILD}｜当前页签 ${activeTab}｜缺失节点：${missing.length ? missing.join('、') : '无'}`);
+      const hit = parentHitTest();
+      toast(`构建 ${BUILD}｜页签 ${activeTab}｜缺失 ${missing.length ? missing.join('、') : '无'}｜命中 ${hit}`);
     });
   }
 }

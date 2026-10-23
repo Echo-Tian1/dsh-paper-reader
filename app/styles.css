@@ -379,7 +379,8 @@ button { font-family: inherit; }
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 8px;
+  flex-wrap: wrap;
+  gap: 6px 8px;
   padding: 8px 10px;
   border-bottom: 1px solid var(--pr-border);
 }
@@ -390,15 +391,24 @@ button { font-family: inherit; }
   padding: 2px;
   border-radius: 8px;
   background: var(--pr-soft);
+  min-width: 0;
+  max-width: 100%;
+  overflow-x: auto;
+  scrollbar-width: none;
 }
+.tabs::-webkit-scrollbar { display: none; }
 
 .tab {
+  flex: 0 0 auto;              /* 不压缩：按钮的点击区域 = 你看到的区域 */
+  white-space: nowrap;
+  min-height: 28px;
   border: none;
   background: transparent;
   color: var(--pr-muted);
   border-radius: 6px;
-  padding: 4px 12px;
+  padding: 6px 12px;
   font-size: 12px;
+  cursor: pointer;
   cursor: pointer;
 }
 .tab:hover { color: var(--pr-fg); }
@@ -1098,7 +1108,7 @@ body.region-dragging .text-layer span {
 
 /* ---------- 论文库页签 / 列表 ---------- */
 .tab-doc {
-  max-width: 9.5em;
+  max-width: 8em;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
