@@ -34,6 +34,8 @@ window.__ModuleLoader__.load({
         open: '打开/收起文献阅读坞',
         collapse: '收起阅读坞',
         expand: '展开阅读坞',
+        focus: '专注阅读（隐藏对话栏）',
+        unfocus: '退出专注阅读（Esc）',
         drag: '拖动调整宽度',
         floating: '布局适配失效：阅读坞以浮层模式打开（DSH 改版后需要修 client.js 的「布局适配」一节）',
         copyOnly: '已复制到剪贴板：先打开一个会话再粘贴',
@@ -43,6 +45,8 @@ window.__ModuleLoader__.load({
         open: 'Toggle the paper reader dock',
         collapse: 'Collapse the dock',
         expand: 'Expand the dock',
+        focus: 'Focus reading (hide the chat column)',
+        unfocus: 'Leave focused reading (Esc)',
         drag: 'Drag to resize',
         floating: 'Layout adapter unavailable: dock opened as a floating panel (fix the "layout adapter" block in client.js)',
         copyOnly: 'Copied to clipboard: open a session and paste it',
@@ -87,7 +91,7 @@ window.__ModuleLoader__.load({
      * ------------------------------------------------------------------ */
     // 注意：React 的 useSyncExternalStore 按 Object.is 比较快照引用，
     // 所以状态必须是不可变的——patch 每次产生新对象，否则订阅者不会重渲染。
-    let state = { open: false, width: 0, floating: false, warn: null }
+    let state = { open: false, width: 0, floating: false, warn: null, focus: false }
     const listeners = new Set()
     function readState() { return state }
     function subscribe(fn) { listeners.add(fn); return () => { listeners.delete(fn) } }
@@ -114,6 +118,11 @@ window.__ModuleLoader__.load({
     function setOpen(open) {
       patch({ open })
       try { window.localStorage.setItem(LS_OPEN, open ? '1' : '0') } catch { /* 隐私模式 */ }
+    }
+
+    /** 专注阅读：坞铺满整窗、把主对话盖住；不改 DSH 的列宽状态，退出即恢复。 */
+    function setFocus(focus) {
+      patch({ focus: Boolean(focus) })
     }
 
     function loadPrefs() {
@@ -242,8 +251,9 @@ window.__ModuleLoader__.load({
           const width = clampWidth(widthRef.current, DEFAULTS.dockWidthRatio)
           widthRef.current = width
           patch({ width })
-          if (dock) dock.style.width = width + 'px'
-          const adapter = attachLayout(width)
+          if (dock && !snap.focus) dock.style.width = width + 'px'
+          // 专注模式：坞铺满整窗，DSH 列宽不再需要让位（padding 归零），退出时恢复
+          const adapter = attachLayout(snap.focus ? 0 : width)
           adapterRef.current = adapter
           sendInit()
           if (!adapter) {
@@ -257,7 +267,7 @@ window.__ModuleLoader__.load({
           return () => {
             if (adapterRef.current) { adapterRef.current.restore(); adapterRef.current = null }
           }
-        }, [snap.open])
+        }, [snap.open, snap.focus])
 
         // 主题：init 时下发 + 监听 body 变化重发
         React.useEffect(() => {
@@ -281,10 +291,20 @@ window.__ModuleLoader__.load({
           return () => window.removeEventListener('message', onMessage)
         }, [ctx, t, sendToApp])
 
+        // Esc 退出专注阅读
+        React.useEffect(() => {
+          if (!snap.focus) return
+          const onKey = (event) => {
+            if (event.key === 'Escape') { event.stopPropagation(); setFocus(false) }
+          }
+          window.addEventListener('keydown', onKey, true)
+          return () => window.removeEventListener('keydown', onKey, true)
+        }, [snap.focus])
+
         // 窗口变化：重新夹取宽度
         React.useEffect(() => {
           const onResize = () => {
-            if (!snap.open) return
+            if (!snap.open || snap.focus) return
             const next = clampWidth(widthRef.current, DEFAULTS.dockWidthRatio)
             if (next === widthRef.current) return
             widthRef.current = next
@@ -323,13 +343,24 @@ window.__ModuleLoader__.load({
           try { window.localStorage.setItem(LS_WIDTH, String(widthRef.current)) } catch { /* ignore */ }
         }
 
-        const close = () => setOpen(false)
+        const close = () => { setFocus(false); setOpen(false) }
+
+        const dockStyle = { display: snap.open ? 'flex' : 'none' }
+        if (snap.focus) {
+          // 铺满整个窗口：盖住主对话，退出后原样恢复
+          dockStyle.left = '0'
+          dockStyle.right = '0'
+          dockStyle.width = 'auto'
+        } else {
+          dockStyle.width = (snap.width || widthRef.current || 0) + 'px'
+        }
 
         return h('div', {
           ref: dockRef,
           className: 'pr-dock',
-          style: { display: snap.open ? 'flex' : 'none' },
+          style: dockStyle,
           'data-floating': snap.floating ? '' : undefined,
+          'data-focus': snap.focus ? '' : undefined,
         },
           h('iframe', {
             ref: iframeRef,
@@ -342,12 +373,20 @@ window.__ModuleLoader__.load({
             h('button', {
               className: 'pr-rail-btn',
               type: 'button',
+              title: snap.focus ? t('unfocus') : t('focus'),
+              'aria-label': snap.focus ? t('unfocus') : t('focus'),
+              'aria-pressed': snap.focus ? 'true' : 'false',
+              onClick: () => setFocus(!snap.focus),
+            }, snap.focus ? '⤡' : '⤢'),
+            h('button', {
+              className: 'pr-rail-btn',
+              type: 'button',
               title: t('collapse'),
               'aria-label': t('collapse'),
               onClick: close,
             }, '»'),
           ),
-          h('div', {
+          snap.focus ? null : h('div', {
             className: 'pr-grip',
             title: t('drag'),
             onPointerDown: onGripDown,

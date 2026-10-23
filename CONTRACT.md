@@ -274,5 +274,6 @@ python3 extract.py <source.pdf> <outDir>
 ## 8. 客户端薄壳与宿主半的约定
 
 - 薄壳不直接读写 `plugin-data`，一切经 HTTP。
-- 薄壳只做：布局适配、iframe、拖宽/收起、主题下发、`toChat` 桥接。
+- 薄壳只做：布局适配、iframe、拖宽/收起、专注模式（铺满整窗 + Esc 退出）、主题下发、`toChat` 桥接。
+- 专注模式只改薄壳自己的面板几何（`padding-left` 归零、面板 `left/right:0`），不改 DSH 列宽状态；退出即恢复原宽度。
 - 阅读器不假设自己嵌在 DSH 里：独立打开时 `window.parent === window`，此时禁用「转到对话」并提示「需在 DSH 窗口中使用」。
