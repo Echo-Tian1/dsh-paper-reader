@@ -11,6 +11,14 @@ import os from 'node:os'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 
+const HERE = path.dirname(fileURLToPath(import.meta.url))
+
+// 夹具 PDF（arXiv:1706.03762v7）不随仓库分发：放到 tests/fixtures/ 或用 PR_FIXTURE 指定；
+// 没有夹具时，依赖真实论文的用例自动 skip，其余用例照常跑。
+const FIXTURE = process.env.PR_FIXTURE || path.join(HERE, 'fixtures', '1706.03762v7.pdf')
+const HAS_FIXTURE = existsSync(FIXTURE)
+const SKIP_NO_FIXTURE = HAS_FIXTURE ? {} : { skip: '缺少夹具 PDF：把 1706.03762v7.pdf 放到 tests/fixtures/ 或设置 PR_FIXTURE' }
+
 import { createApp } from '../index.js'
 import {
   appendExplanation,
@@ -20,13 +28,7 @@ import {
   writeJsonAtomic,
 } from '../store.js'
 
-const HERE = path.dirname(fileURLToPath(import.meta.url))
 
-// 夹具 PDF（arXiv:1706.03762v7）不随仓库分发：放到 tests/fixtures/ 或用 PR_FIXTURE 指定；
-// 没有夹具时，依赖真实论文的用例自动 skip，其余用例照常跑。
-const FIXTURE = process.env.PR_FIXTURE || path.join(HERE, 'fixtures', '1706.03762v7.pdf')
-const HAS_FIXTURE = existsSync(FIXTURE)
-const SKIP_NO_FIXTURE = HAS_FIXTURE ? {} : { skip: '缺少夹具 PDF：把 1706.03762v7.pdf 放到 tests/fixtures/ 或设置 PR_FIXTURE' }
 const PREFIX = '/dsh-paper-reader'
 const LEGACY_ID = 'eeeeeeeeeeeeeeee'
 

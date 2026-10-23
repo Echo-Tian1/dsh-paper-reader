@@ -47,6 +47,22 @@ let portalLink = null;
 let annotations = [];     // 当前论文批注（不可变快照）
 let activeAnnotation = null;
 let annoNoteTimer = null;
+
+// ---------- 结构化摘要卡片状态 ----------
+const LS_SUMMARY_COLLAPSED = 'pr.summary.collapsed';
+let summaryState = {
+  docId: null,
+  status: 'hidden', // hidden | loading | guide | streaming | done | error
+  entry: null,
+  answer: '',
+  error: null,
+  force: false,
+  cached: false,
+  token: 0,
+  collapsed: false,
+};
+let summaryAbort = null;
+let summaryRenderQueued = false;
 const LS_LINKS = 'pr.links';
 
 // ---------- HTTP 客户端（正式模式） ----------
@@ -179,6 +195,16 @@ const httpApi = {
     return `${API_BASE}/api/docs/${encodeURIComponent(docId)}/notes.md`;
   },
 
+  async getSummary(docId) {
+    return parseResponse(
+      await fetch(`${API_BASE}/api/docs/${encodeURIComponent(docId)}/summary`, { cache: 'no-store' })
+    );
+  },
+
+  summarizeStream(body, signal) {
+    return postStream(`${API_BASE}/api/summarize`, body, signal);
+  },
+
   async getLinks(docId) {
     return parseResponse(
       await fetch(`${API_BASE}/api/docs/${encodeURIComponent(docId)}/links`, { cache: 'no-store' })
@@ -238,6 +264,7 @@ const EXPECTED_NODES = [
   'tab-current', 'tab-history', 'tab-terms', 'tab-notes',
   'pane-current', 'pane-history', 'pane-terms', 'pane-notes',
   'thread', 'history-list', 'terms-list', 'notes-list',
+  'summary-card', 'summary-body',
 ];
 function missingNodes() {
   return EXPECTED_NODES.filter((id) => !document.getElementById(id));
@@ -326,6 +353,7 @@ async function main() {
     onAnnotationJump: (item) => {
       if (item) paper.jumpToAnnotation(item);
     },
+    onOpenSummary: (entry) => openSummaryFromHistory(entry),
     onJumpEntry: (entry) => {
       paper.scrollToPage(entry.page);
       if (entry.kind === 'region') paper.flashRegion(entry.page, entry.rect);
@@ -375,6 +403,8 @@ async function main() {
   }
 
   explain.setEmbedded(bridge.embedded);
+  paper.bindSummaryCard(els.summaryCard);
+  restoreSummaryCollapsed();
 
   applyZoom(readStoredZoom(), { persist: false });
   setLinksUi(readStoredLinks(), { persist: false });
@@ -464,6 +494,11 @@ function cacheEls() {
     'anno-colors',
     'anno-delete',
     'anno-status',
+    'summary-card',
+    'summary-meta',
+    'summary-body',
+    'summary-regen',
+    'summary-toggle',
   ];
   for (const id of ids) {
     els[id.replace(/-([a-z])/g, (_, ch) => ch.toUpperCase())] = document.getElementById(id);
@@ -531,6 +566,7 @@ function wireEvents() {
 
   wireRegionToolbar();
   wireAnnotationPopover();
+  wireSummaryCard();
 
   els.linksToggle.addEventListener('click', () => {
     setLinksUi(!state.linksEnabled);
@@ -660,6 +696,9 @@ function renderRecent() {
 
 function showEmptyState() {
   els.emptyState.hidden = false;
+  summaryAbort?.abort();
+  summaryState = { ...summaryState, docId: null, status: 'hidden', entry: null, answer: '', error: null };
+  if (els.summaryCard) els.summaryCard.hidden = true;
   els.docTitle.textContent = '未打开论文';
   els.pageIndicator.hidden = true;
   els.docsSelect.hidden = state.docs.length === 0;
@@ -692,6 +731,7 @@ async function openDoc(docId, { restoreScrollTop = null } = {}) {
     state.doc = doc;
     state.structure = structure;
     hideEmptyState();
+    prepareSummaryForDoc(docId);
 
     els.docTitle.textContent = structure.title || doc.title || '未命名论文';
     els.pageIndicator.hidden = false;
@@ -743,6 +783,8 @@ async function openDoc(docId, { restoreScrollTop = null } = {}) {
     closeLinkPortal();
     linkBack = [];
     updateBackPill();
+
+    void loadSummary(docId);
 
     state.ui = { ...state.ui, lastDocId: docId };
     persistUi();
@@ -1697,6 +1739,357 @@ function handleGlobalKeydown(event) {
     default:
       return;
   }
+}
+
+// ---------- 结构化摘要卡片 ----------
+
+const SUMMARY_HIDDEN_STATUSES = new Set(['hidden']);
+
+function restoreSummaryCollapsed() {
+  let collapsed = false;
+  try { collapsed = window.localStorage.getItem(LS_SUMMARY_COLLAPSED) === '1'; } catch (err) { /* 隐私模式 */ }
+  summaryState = { ...summaryState, collapsed };
+}
+
+function setSummaryCollapsed(collapsed) {
+  summaryState = { ...summaryState, collapsed: !!collapsed };
+  try { window.localStorage.setItem(LS_SUMMARY_COLLAPSED, collapsed ? '1' : '0'); } catch (err) { /* 隐私模式 */ }
+  renderSummary();
+}
+
+function prepareSummaryForDoc(docId) {
+  summaryAbort?.abort();
+  summaryAbort = null;
+  summaryState = {
+    ...summaryState,
+    docId,
+    status: 'loading',
+    entry: null,
+    answer: '',
+    error: null,
+    force: false,
+    cached: false,
+    token: summaryState.token + 1,
+  };
+  if (els.summaryCard) els.summaryCard.hidden = false;
+  renderSummary();
+}
+
+function wireSummaryCard() {
+  if (!els.summaryCard) return;
+  els.summaryToggle.addEventListener('click', () => setSummaryCollapsed(!summaryState.collapsed));
+  els.summaryRegen.addEventListener('click', () => {
+    if (summaryState.status === 'streaming' || summaryState.status === 'loading') return;
+    void generateSummary({ force: true });
+  });
+  els.summaryCard.addEventListener('click', (event) => {
+    const act = event.target.closest('[data-summary-act]')?.dataset.summaryAct;
+    if (!act) return;
+    if (act === 'generate') void generateSummary({ force: false });
+    else if (act === 'retry') void generateSummary({ force: summaryState.force });
+  });
+}
+
+async function loadSummary(docId) {
+  if (!state.api || !els.summaryCard) return;
+  const token = summaryState.token;
+  try {
+    const payload = await state.api.getSummary(docId);
+    if (token !== summaryState.token || summaryState.docId !== docId) return;
+    const entry = payload?.entry || null;
+    if (entry && entry.answer) {
+      summaryState = { ...summaryState, status: 'done', entry, answer: entry.answer, cached: false };
+    } else {
+      summaryState = { ...summaryState, status: 'guide', entry: null, answer: '', error: null };
+    }
+  } catch (err) {
+    if (token !== summaryState.token || summaryState.docId !== docId) return;
+    // 取不到缓存（老宿主/网络）也回到引导卡，不自动花钱
+    summaryState = { ...summaryState, status: 'guide', entry: null, answer: '', error: null };
+  }
+  renderSummary();
+}
+
+async function readSummaryError(res) {
+  try {
+    const text = await res.text();
+    if (!text) return null;
+    const data = JSON.parse(text);
+    return data?.error?.message || null;
+  } catch (err) {
+    return null;
+  }
+}
+
+async function generateSummary({ force = false } = {}) {
+  if (!state.doc || !els.summaryCard) return;
+  if (!state.structure) return;
+  const docId = state.doc.id;
+  summaryAbort?.abort();
+  const controller = new AbortController();
+  summaryAbort = controller;
+  const token = summaryState.token + 1;
+  summaryState = {
+    ...summaryState,
+    token,
+    docId,
+    status: 'streaming',
+    answer: '',
+    error: null,
+    force: !!force,
+    cached: false,
+  };
+  renderSummary();
+
+  try {
+    const res = await state.api.summarizeStream({ docId, force: !!force }, controller.signal);
+    if (token !== summaryState.token || summaryState.docId !== docId) return;
+    if (!res || !res.ok) {
+      const message = res ? await readSummaryError(res) : null;
+      throw new Error(message || `摘要请求失败（HTTP ${res?.status ?? '网络错误'}）`);
+    }
+    await explain.consumeEventStream(
+      res,
+      (ev) => {
+        if (token !== summaryState.token || summaryState.docId !== docId) return;
+        handleSummaryEvent(ev, { force });
+      },
+      { onParseError: (err) => console.warn('[paper-reader] 摘要 SSE 解析失败', err) }
+    );
+    if (controller.signal.aborted || token !== summaryState.token) return;
+    if (summaryState.status === 'streaming') {
+      summaryState = {
+        ...summaryState,
+        status: 'error',
+        error: { code: 'incomplete', message: '连接中断，摘要未完成（不会写入缓存）。可以重试。' },
+      };
+      renderSummary();
+    }
+  } catch (err) {
+    if (err?.name === 'AbortError' || controller.signal.aborted) return;
+    if (token !== summaryState.token || summaryState.docId !== docId) return;
+    summaryState = {
+      ...summaryState,
+      status: 'error',
+      error: { code: err?.code || 'summary-failed', message: err?.message || '摘要生成失败，请重试' },
+    };
+    renderSummary();
+  } finally {
+    if (summaryAbort === controller) summaryAbort = null;
+  }
+}
+
+function handleSummaryEvent(ev, { force }) {
+  switch (ev.type) {
+    case 'meta': {
+      if (ev.cached) summaryState = { ...summaryState, cached: true };
+      renderSummary();
+      break;
+    }
+    case 'delta': {
+      if (typeof ev.text !== 'string' || !ev.text) break;
+      summaryState = { ...summaryState, status: 'streaming', answer: summaryState.answer + ev.text };
+      scheduleSummaryRender();
+      break;
+    }
+    case 'done': {
+      const entry = ev.entry || null;
+      summaryState = {
+        ...summaryState,
+        status: 'done',
+        entry,
+        answer: entry?.answer || summaryState.answer,
+        error: null,
+        cached: false,
+      };
+      renderSummary();
+      explain.invalidateHistory();
+      toast(force ? '摘要已更新' : '摘要已生成');
+      break;
+    }
+    case 'error': {
+      summaryState = {
+        ...summaryState,
+        status: 'error',
+        error: { code: ev.code || 'llm-failed', message: ev.message || '模型调用失败' },
+      };
+      renderSummary();
+      break;
+    }
+    default:
+      break;
+  }
+}
+
+function scheduleSummaryRender() {
+  if (summaryRenderQueued) return;
+  summaryRenderQueued = true;
+  requestAnimationFrame(() => {
+    summaryRenderQueued = false;
+    renderSummary();
+  });
+}
+
+function renderSummary() {
+  if (!els.summaryCard) return;
+  const st = summaryState;
+  const wasVisible = !els.summaryCard.hidden;
+  const prevHeight = wasVisible ? els.summaryCard.getBoundingClientRect().height : 0;
+  if (SUMMARY_HIDDEN_STATUSES.has(st.status) || !state.doc || !st.docId) {
+    els.summaryCard.hidden = true;
+    return;
+  }
+  els.summaryCard.hidden = false;
+  els.summaryCard.classList.toggle('collapsed', st.collapsed);
+  els.summaryToggle.textContent = explain.summaryToggleLabel(st.collapsed);
+  els.summaryToggle.setAttribute('aria-expanded', String(!st.collapsed));
+  els.summaryToggle.title = explain.summaryToggleTitle(st.collapsed);
+
+  let meta = '';
+  if (st.status === 'loading') meta = '正在读取摘要缓存…';
+  else if (st.status === 'guide') meta = '尚未生成（不会自动调用模型）';
+  else if (st.status === 'streaming') meta = st.cached ? '缓存命中…' : '生成中…';
+  else if (st.status === 'done') {
+    meta = explain.summaryCacheLabel(st.entry);
+    if (st.entry?.supersedes) meta += ' · 已更新';
+  } else if (st.status === 'error') meta = '生成失败';
+  els.summaryMeta.textContent = meta;
+
+  const showRegen = st.status === 'done' || st.status === 'error';
+  els.summaryRegen.hidden = !showRegen;
+  els.summaryRegen.disabled = st.status === 'streaming';
+
+  const body = els.summaryBody;
+  body.innerHTML = '';
+  if (st.status === 'loading') {
+    body.appendChild(summarySkeleton());
+  } else if (st.status === 'guide') {
+    body.appendChild(renderSummaryGuide());
+  } else if (st.status === 'streaming') {
+    const wrap = document.createElement('div');
+    wrap.className = 'summary-md pr-md-streaming';
+    wrap.innerHTML = explain.renderMarkdown(st.answer);
+    body.appendChild(wrap);
+  } else if (st.status === 'done') {
+    renderSummaryMarkdown(body, st.entry?.answer || st.answer || '');
+    if (st.entry?.model) {
+      const foot = document.createElement('div');
+      foot.className = 'summary-footnote';
+      foot.textContent = `模型 ${st.entry.model} · 一次生成后永久缓存在本机`;
+      body.appendChild(foot);
+    }
+  } else if (st.status === 'error') {
+    body.appendChild(renderSummaryError());
+  }
+
+  // 卡片内容高度变化时补偿滚动位置，避免正在阅读的页突然上下跳（流式期间不平滑补偿）
+  if (wasVisible && st.status !== 'streaming' && els.paperScroll.scrollTop > 0) {
+    const nextHeight = els.summaryCard.getBoundingClientRect().height;
+    const delta = nextHeight - prevHeight;
+    if (Math.abs(delta) > 2) els.paperScroll.scrollTop += delta;
+  }
+}
+
+function summarySkeleton() {
+  const box = document.createElement('div');
+  box.className = 'summary-skeleton';
+  for (let i = 0; i < 3; i++) {
+    const line = document.createElement('div');
+    line.className = 'summary-skeleton-line';
+    box.appendChild(line);
+  }
+  return box;
+}
+
+function renderSummaryGuide() {
+  const box = document.createElement('div');
+  box.className = 'summary-guide';
+  const title = document.createElement('div');
+  title.className = 'summary-guide-title';
+  title.textContent = '生成结构化摘要（一次生成，之后免费）';
+  const sub = document.createElement('div');
+  sub.className = 'summary-guide-sub';
+  sub.textContent = '六节要点：一句话结论 / 研究问题 / 数据与样本 / 方法 / 主要结论 / 局限与存疑。先看结论再决定要不要细读。';
+  const btn = document.createElement('button');
+  btn.type = 'button';
+  btn.className = 'btn btn-primary';
+  btn.dataset.summaryAct = 'generate';
+  btn.textContent = '生成摘要';
+  box.append(title, sub, btn);
+  return box;
+}
+
+function renderSummaryError() {
+  const box = document.createElement('div');
+  box.className = 'summary-error';
+  const msg = document.createElement('div');
+  msg.textContent = `摘要生成失败：${summaryState.error?.message || '未知错误'}`;
+  const btn = document.createElement('button');
+  btn.type = 'button';
+  btn.className = 'btn';
+  btn.dataset.summaryAct = 'retry';
+  btn.textContent = '重试';
+  box.append(msg, btn);
+  return box;
+}
+
+function renderSummaryMarkdown(container, markdown) {
+  const parsed = explain.parseSummaryMarkdown(markdown || '');
+  const oneLine = explain.summaryOneLine(parsed);
+  const sections = explain.summaryBodySections(parsed);
+  if (!oneLine && !sections.length) {
+    const fallback = document.createElement('div');
+    fallback.className = 'summary-md';
+    fallback.innerHTML = explain.renderMarkdown(markdown || '');
+    container.appendChild(fallback);
+    return;
+  }
+  if (oneLine) {
+    const tldr = document.createElement('div');
+    tldr.className = 'summary-tldr';
+    const label = document.createElement('span');
+    label.className = 'summary-tldr-label';
+    label.textContent = '一句话结论';
+    const text = document.createElement('div');
+    text.className = 'summary-tldr-text';
+    text.textContent = oneLine;
+    tldr.append(label, text);
+    container.appendChild(tldr);
+  }
+  for (const section of sections) {
+    const block = document.createElement('div');
+    block.className = 'summary-section';
+    const heading = document.createElement('h4');
+    heading.textContent = section.title;
+    const content = document.createElement('div');
+    content.className = 'summary-md';
+    content.innerHTML = explain.renderMarkdown(section.body);
+    block.append(heading, content);
+    container.appendChild(block);
+  }
+}
+
+/** 历史里点 summary 条目：滚到摘要卡并展开（不是跳回第 1 页顶部了事）。 */
+function openSummaryFromHistory(entry) {
+  if (!entry || !state.doc) return;
+  if (entry.docId && entry.docId !== state.doc.id) return;
+  summaryAbort?.abort();
+  summaryAbort = null;
+  summaryState = {
+    ...summaryState,
+    docId: state.doc.id,
+    status: 'done',
+    entry,
+    answer: entry.answer || summaryState.answer || '',
+    error: null,
+    force: false,
+    cached: false,
+    token: summaryState.token + 1,
+    collapsed: false,
+  };
+  try { window.localStorage.setItem(LS_SUMMARY_COLLAPSED, '0'); } catch (err) { /* 隐私模式 */ }
+  renderSummary();
+  paper.scrollToSummary();
 }
 
 // ---------- 错误条 / toast / busy ----------

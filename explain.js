@@ -22,6 +22,7 @@ import {
   PaperError,
   RECIPE,
   REGION_RECIPE,
+  SUMMARY_RECIPE,
   TRANSLATE_RECIPE,
   appendExplanation,
   cacheKey,
@@ -34,6 +35,7 @@ import {
   readExplanations,
   readStructure,
   regionKey,
+  summaryKey,
   targetLanguage,
   translateKey,
   updateExplanation,
@@ -73,6 +75,24 @@ export const REGION_SYSTEM_PROMPT = `你是一位耐心的学术论文阅读助�
 ### 3. 与上下文的关系
 （2-4 行：这块内容在所在段落/章节里承担什么作用，与前后文怎么衔接）
 不要输出开场白、总结、免责声明。`
+
+/** 整篇结构化摘要 system（固定六节，不输出 terms trailer）。 */
+export const SUMMARY_SYSTEM_PROMPT = `你是一位为量化研究者服务的论文速读助手。只依据用户提供的论文材料作答，不要引入材料之外的文献或事实。
+严格按以下六节输出 Markdown：必须且只能有这六节，顺序固定，节标题一字不差。
+## 一句话结论
+（≤60 字，直接回答「这篇论文值不值得细读」，面向量化研究者，不要铺垫）
+## 研究问题
+（2-5 条要点）
+## 数据与样本
+（2-5 条要点）
+## 方法
+（2-5 条要点）
+## 主要结论
+（2-5 条要点，尽量带方向性或数值信息）
+## 局限与存疑
+（2-5 条要点：作者承认的局限 + 你从材料里看到的存疑点；没有就写「论文中未明确」）
+要求：每节用 "- " 列表写 2-5 条；材料没写的写「论文中未明确」，不确定处写「不确定」；
+不要开场白、总结、免责声明；不要输出任何 HTML 注释或机器可读标记。`
 
 const TERMS_MARKER = '<!--terms:'
 const TERMS_CLOSE = '-->'
@@ -188,6 +208,93 @@ export class TermsHoldback {
 // ---------------------------------------------------------------------------
 // 上下文 / 语言 / 区域
 // ---------------------------------------------------------------------------
+
+/** 结构化摘要源材料的长度预算（契约：总长 ≤6000 字）。 */
+export const SUMMARY_MATERIAL_LIMITS = {
+  abstract: 1200,
+  sectionExcerpt: 300,
+  maxSections: 12,
+  total: 6000,
+}
+
+/** 找摘要正文：优先 “Abstract” 标题后的段落；否则取第 1 页最长的正文段。 */
+function findAbstractParagraph(paras) {
+  const list = Array.isArray(paras) ? paras : []
+  for (let index = 0; index < list.length; index += 1) {
+    const text = String(list[index]?.text ?? '').trim()
+    if (/^abstract\b/i.test(text) && text.length < 40) {
+      const next = list[index + 1]
+      const nextText = String(next?.text ?? '').trim()
+      if (nextText) return nextText
+    }
+  }
+  // 有些 PDF 没有 “Abstract” 标题：取第 1 页最长的正文段兜底
+  const candidates = list
+    .filter(para => Number(para?.page) === 1 && String(para?.text ?? '').trim().length >= 80)
+    .sort((left, right) => String(right.text).length - String(left.text).length)
+  return candidates.length > 0 ? String(candidates[0].text) : ''
+}
+
+/** 找某节第一个“正文段”（跳过与节标题同名的 heading 段和过短碎片）。 */
+function findSectionFirstParagraph(structure, section) {
+  const paras = Array.isArray(structure?.paras) ? structure.paras : []
+  const sectionId = String(section?.id ?? '')
+  const sectionTitle = String(section?.title ?? '').trim().toLowerCase()
+  const relevant = paras.filter(para => {
+    if (!para) return false
+    if (sectionId && para.sectionId === sectionId) return true
+    return Array.isArray(section?.paraIds) && section.paraIds.includes(para.id)
+  })
+  for (const para of relevant) {
+    const text = String(para.text ?? '').trim()
+    if (!text) continue
+    if (text.toLowerCase() === sectionTitle && text.length <= 120) continue // 章节标题本身
+    if (text.length < 60) continue
+    return text
+  }
+  const fallback = relevant.map(para => String(para?.text ?? '').trim()).find(text => text.length > 0)
+  return fallback ?? ''
+}
+
+/**
+ * 拼装结构化摘要的源材料（质量关键，不只是摘要）：
+ * 标题 + 摘要/首页正文（≤1200 字）+ 目录（title/level）+ 每节首段（各 ≤300 字、最多 12 节），
+ * 总长 ≤6000 字。
+ * @param {object} structure structure.json
+ * @returns {string} 带小标题的结构化材料
+ */
+export function buildSummaryMaterial(structure) {
+  const limits = SUMMARY_MATERIAL_LIMITS
+  const title = String(structure?.title ?? '').trim() || '（未知标题）'
+  const sections = Array.isArray(structure?.sections) ? structure.sections : []
+  // 目录里跳过卷首页（第一节标题与论文标题相同、且在第 1 页）
+  const tocSections = sections.filter((section, index) => {
+    const sameTitle = String(section?.title ?? '').trim() === title
+    return !(index === 0 && sameTitle && Number(section?.page) === 1)
+  })
+  const abstractText = truncate(findAbstractParagraph(structure?.paras), limits.abstract)
+  const lines = [
+    '# 论文',
+    title,
+    '',
+    '## 摘要 / 首页正文',
+    abstractText || '（论文中未明确）',
+    '',
+    '## 目录',
+  ]
+  for (const section of tocSections) {
+    const level = Math.max(0, (Number(section?.level) || 1) - 1)
+    lines.push(`${'  '.repeat(Math.min(level, 3))}- ${String(section?.title ?? '')}`)
+  }
+  lines.push('', '## 各节首段')
+  for (const section of tocSections.slice(0, limits.maxSections)) {
+    const excerpt = truncate(findSectionFirstParagraph(structure, section), limits.sectionExcerpt)
+    lines.push('', `### ${String(section?.title ?? '')}（第 ${Number(section?.page) || 1} 页）`, excerpt || '（论文中未明确）')
+  }
+  let material = lines.join('\n').trim()
+  if (material.length > limits.total) material = material.slice(0, limits.total)
+  return material
+}
 
 /**
  * 拼装选句解释的上下文（CONTRACT §6 user 模板）。
@@ -876,6 +983,112 @@ export async function serveRegion({ ctx, config, env = process.env, req, res }) 
     await appendExplanation(docId, entry, env)
   } catch (error) {
     finishWithError(res, `区域解释已生成但写入缓存失败：${error instanceof Error ? error.message : String(error)}`)
+    return
+  }
+  writeEvent(res, { type: 'done', entry })
+  res.end()
+}
+
+/**
+ * 处理 POST /api/summarize（整篇结构化摘要，summary-v1）。
+ * 一次生成、永久缓存；命中且非 force → 零 token 回放。
+ * summary 不参与术语表、不参与原文标记（无 page 语义，固定 page:1 / paraId:""）。
+ */
+export async function serveSummarize({ ctx, config, env = process.env, req, res }) {
+  let body
+  try {
+    body = await readJsonBody(req, EXPLAIN_BODY_LIMIT)
+  } catch (error) {
+    respondError(res, error)
+    return
+  }
+  const docId = body?.docId
+  if (typeof docId !== 'string' || !/^[0-9a-f]{16}$/.test(docId)) {
+    respondError(res, new PaperError('bad-request', '缺少或非法的 docId', 400))
+    return
+  }
+  let structure
+  try {
+    structure = await readStructure(docId, env)
+  } catch (error) {
+    respondError(res, error)
+    return
+  }
+  if (!structure) {
+    respondError(res, new PaperError('not-found', `找不到文档：${docId}`, 404))
+    return
+  }
+
+  const kind = 'summary'
+  const force = body.force === true
+  const recipe = SUMMARY_RECIPE
+  const sourceMaterial = buildSummaryMaterial(structure)
+  const key = summaryKey(docId, sourceMaterial)
+  const entries = await readExplanations(docId, env)
+  const latest = latestByKey(entries).get(key) ?? null
+  if (latest && typeof latest.answer === 'string' && latest.answer.trim() && !force) {
+    let entry = latest
+    try {
+      entry = await updateExplanation(docId, latest.id, {
+        hitCount: (Number(latest.hitCount) || 0) + 1,
+        lastHitAt: new Date().toISOString(),
+      }, env)
+    } catch {
+      // 统计失败不影响回放
+    }
+    serveCached(res, kind, entry)
+    return
+  }
+
+  const id = `e_${randomBytes(8).toString('hex')}`
+  const provider = config.provider
+  const model = config.model
+  const entry = {
+    id,
+    key,
+    recipe,
+    kind,
+    docId,
+    page: 1,
+    paraId: '',
+    selText: '',
+    normText: '',
+    sectionId: '',
+    contextHash: hashContext(recipe, SUMMARY_SYSTEM_PROMPT, sourceMaterial),
+    provider,
+    model,
+    answer: '',
+    createdAt: new Date().toISOString(),
+    hitCount: 0,
+    lastHitAt: null,
+    supersedes: latest?.id ?? null,
+  }
+  const request = {
+    provider: config.provider,
+    model: config.model,
+    system: SUMMARY_SYSTEM_PROMPT,
+    messages: [{ role: 'user', content: [{ type: 'text', text: sourceMaterial }] }],
+    temperature: config.temperature,
+    maxTokens: config.maxTokens,
+  }
+
+  startSse(res)
+  writeEvent(res, { type: 'meta', cached: false, kind, id, key })
+  const result = await consumeCompletion({ ctx, config, req, res, request })
+  if (result.clientGone) {
+    try { res.end() } catch { /* 已断开 */ }
+    return
+  }
+  const errorMessage = completionError(result)
+  if (errorMessage) {
+    finishWithError(res, errorMessage)
+    return
+  }
+  entry.answer = result.answer
+  try {
+    await appendExplanation(docId, entry, env)
+  } catch (error) {
+    finishWithError(res, `摘要已生成但写入缓存失败：${error instanceof Error ? error.message : String(error)}`)
     return
   }
   writeEvent(res, { type: 'done', entry })

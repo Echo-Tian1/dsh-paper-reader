@@ -20,6 +20,8 @@ export const RECIPE = 'v2'
 export const TRANSLATE_RECIPE = 'translate-v1'
 /** 框选区域解释配方版本。 */
 export const REGION_RECIPE = 'region-v1'
+/** 整篇结构化摘要配方版本。 */
+export const SUMMARY_RECIPE = 'summary-v1'
 
 /** 文档 id 形如 sha256(pdf 字节).slice(0,16)，小写十六进制。 */
 const DOC_ID_RE = /^[0-9a-f]{16}$/
@@ -183,6 +185,26 @@ export function cjkRatio(text) {
 /** 目标语言：CJK 占比 < 0.5 → 译成中文（zh）；≥ 0.5 → 译成英文（en）。 */
 export function targetLanguage(text) {
   return cjkRatio(text) < 0.5 ? 'zh' : 'en'
+}
+
+/** 结构化摘要缓存键：sha256(docId|summary-v1|sha1(摘要源材料))（源材料变化才会 miss）。 */
+export function summaryKey(docId, sourceMaterial) {
+  return sha256(`${docId}|${SUMMARY_RECIPE}|${sha1(sourceMaterial)}`)
+}
+
+/** 取最新一条 summary 条目（老数据没有 kind=summary → null）。 */
+export function latestSummary(entries) {
+  let latest = null
+  let latestTime = -Infinity
+  for (const entry of entries ?? []) {
+    if (!entry || entry.kind !== 'summary') continue
+    const time = Date.parse(entry.createdAt ?? '') || 0
+    if (!latest || time > latestTime) {
+      latest = entry
+      latestTime = time
+    }
+  }
+  return latest
 }
 
 /** 上下文哈希：配方 + system + user 文本，用于历史里判断上下文是否变过。 */

@@ -31,6 +31,13 @@ import {
   stripMachineComment,
   termMetaParts,
   threadActionState,
+  parseSummaryMarkdown,
+  plainInlineMarkdown,
+  summaryOneLine,
+  summaryBodySections,
+  summaryCacheLabel,
+  summaryToggleLabel,
+  summaryToggleTitle,
 } from '../explain.js';
 import {
   locateRange,
@@ -183,6 +190,25 @@ check('index.html 有 P0 新 UI 挂载点', () => {
 
 check('styles.css 有搜索高亮 / 目录 / 链接 / 批注样式', () => {
   for (const token of ['.pr-search-hit', '.toc-panel', '.link-hotzone', '.anno-mark', '.anno-color-yellow', '.anno-popover', '.notes-item', '.back-pill', '.link-portal', '.zoom-control']) {
+    assert.ok(css.includes(token), `styles.css 缺少 ${token}`);
+  }
+});
+
+check('app.js 覆盖 P1 摘要接口与折叠持久化', () => {
+  for (const token of ['/api/docs/${encodeURIComponent(docId)}/summary', '/api/summarize', 'summarizeStream', 'getSummary', 'pr.summary.collapsed', 'summaryCard', 'summary-tldr']) {
+    assert.ok(appJs.includes(token) || appJs.includes(token.replace('${encodeURIComponent(docId)}', '')), `app.js 缺少 ${token}`);
+  }
+  assert.ok(!/fetch\('\/api\//.test(appJs));
+});
+
+check('index.html 有摘要卡片骨架与操作按钮', () => {
+  for (const id of ['summary-card', 'summary-meta', 'summary-body', 'summary-regen', 'summary-toggle']) {
+    assert.ok(html.includes(`id="${id}"`), `index.html 缺少 #${id}`);
+  }
+});
+
+check('styles.css 有摘要卡片 / 一句话结论 / 六节 / 摘要徽标样式', () => {
+  for (const token of ['.summary-card', '.summary-tldr', '.summary-tldr-label', '.summary-section', '.summary-skeleton', '.summary-error', '.badge-summary']) {
     assert.ok(css.includes(token), `styles.css 缺少 ${token}`);
   }
 });
@@ -807,6 +833,83 @@ check('fixture mock 覆盖 P0 新接口', () => {
   for (const token of ['getLinks', 'getAnnotations', 'createAnnotation', 'patchAnnotation', 'deleteAnnotation', 'notesMdUrl']) {
     assert.ok(mockJs.includes(token), `mock 缺少 ${token}`);
   }
+});
+
+// ---------- P1 结构化摘要 ----------
+
+check('parseSummaryMarkdown：六节标题解析 / 顺序 / 正文', () => {
+  const md = [
+    '## 一句话结论',
+    '值得细读，必读。',
+    '',
+    '## 研究问题',
+    '- 问题一',
+    '- 问题二',
+    '',
+    '### 数据与样本',
+    'WMT 2014。',
+    '',
+    '## 方法',
+    '**注意力**。',
+  ].join('\n');
+  const parsed = parseSummaryMarkdown(md);
+  assert.equal(parsed.sections.length, 4);
+  assert.deepEqual(parsed.sections.map((s) => s.title), ['一句话结论', '研究问题', '数据与样本', '方法']);
+  assert.equal(parsed.sections[1].body, '- 问题一\n- 问题二');
+  assert.equal(summaryOneLine(parsed), '值得细读，必读。');
+  assert.equal(summaryBodySections(parsed).length, 3);
+  assert.deepEqual(summaryBodySections(parsed).map((s) => s.title), ['研究问题', '数据与样本', '方法']);
+  assert.deepEqual(parseSummaryMarkdown(''), { preamble: '', sections: [] });
+});
+
+check('summaryOneLine / plainInlineMarkdown：去掉行内标记取纯文本', () => {
+  assert.equal(plainInlineMarkdown('**重点** 与 `code` 和 [链接](https://x)'), '重点 与 code 和 链接');
+  assert.equal(plainInlineMarkdown('- 列表项'), '列表项');
+  const parsed = parseSummaryMarkdown('## 一句话结论\n> **不要错过**：这是 `Transformer` 开山作。');
+  assert.equal(summaryOneLine(parsed), '不要错过：这是 Transformer 开山作。');
+  assert.equal(summaryOneLine(parseSummaryMarkdown('## 方法\n无')), '');
+});
+
+check('summaryCacheLabel / 折叠按钮文案', () => {
+  assert.equal(summaryCacheLabel(null), '缓存');
+  assert.ok(summaryCacheLabel({ createdAt: '2026-10-22T07:00:00.000Z' }).startsWith('缓存 · 生成于 '));
+  assert.equal(summaryToggleLabel(false), '−');
+  assert.equal(summaryToggleLabel(true), '+');
+  assert.equal(summaryToggleTitle(true), '展开摘要');
+  assert.equal(summaryToggleTitle(false), '折叠摘要');
+});
+
+check('summary kind 的徽标/旧配方/事件分发', () => {
+  assert.equal(kindLabel('summary'), '摘要');
+  assert.equal(resolveKind({ kind: 'summary' }, null), 'summary');
+  assert.equal(resolveKind(null, { kind: 'summary' }), 'summary');
+  assert.equal(isOldRecipe('summary-v1', 'summary'), false);
+  assert.equal(isOldRecipe('v2', 'summary'), true);
+  assert.equal(isOldRecipe(null, 'summary'), false);
+});
+
+check('fixture P1：summary.json 六节数据 + mock 两接口', () => {
+  const payload = readJson('fixture/summary.json');
+  const entry = payload.entry;
+  assert.ok(entry && entry.kind === 'summary' && entry.recipe === 'summary-v1');
+  assert.ok(entry.answer.includes('## 一句话结论'));
+  const parsed = parseSummaryMarkdown(entry.answer);
+  assert.equal(parsed.sections.length, 6);
+  assert.deepEqual(parsed.sections.map((s) => s.title), [
+    '一句话结论', '研究问题', '数据与样本', '方法', '主要结论', '局限与存疑',
+  ]);
+  assert.ok(summaryOneLine(parsed).length > 10);
+  for (const token of ['getSummary', 'summarizeStream', 'kind: \'summary\'']) {
+    assert.ok(mockJs.includes(token), `mock 缺少 ${token}`);
+  }
+});
+
+check('fixture P1：历史 index 含 summary 条目（kind=summary）', () => {
+  const index = readJson('fixture/explanations-index.json').index;
+  // legacy fixture 没有 summary；mock 会动态合并 summary 条目，这里只验证 mock 源码里的合并逻辑
+  assert.ok(mockJs.includes("kind: 'summary'"));
+  assert.ok(mockJs.includes('await ensureSummaryLoaded()'));
+  assert.ok(!index.some((item) => item.kind === 'summary'), 'fixture 静态 index 不应硬编码 summary（由 mock 动态合并）');
 });
 
 // ---------- 汇总 ----------

@@ -16,7 +16,7 @@
 
 const HTML_ESCAPES = { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' };
 
-const THREAD_KINDS = ['explain', 'translate', 'region'];
+const THREAD_KINDS = ['explain', 'translate', 'region', 'summary'];
 
 /** HTML 转义（Markdown 渲染第一步，必须先转义再拼标签）。 */
 export function escapeHtml(text) {
@@ -164,6 +164,8 @@ export function kindLabel(kind) {
       return '翻译';
     case 'region':
       return '公式';
+    case 'summary':
+      return '摘要';
     default:
       return '解释';
   }
@@ -172,7 +174,14 @@ export function kindLabel(kind) {
 /** 旧配方判定（每种 kind 有自己的当前配方版本）。 */
 export function isOldRecipe(recipe, kind) {
   if (!recipe) return false;
-  const expected = kind === 'translate' ? 'translate-v1' : kind === 'region' ? 'region-v1' : 'v2';
+  const expected =
+    kind === 'translate'
+      ? 'translate-v1'
+      : kind === 'region'
+        ? 'region-v1'
+        : kind === 'summary'
+          ? 'summary-v1'
+          : 'v2';
   return recipe !== expected;
 }
 
@@ -259,6 +268,85 @@ export async function copyText(text) {
   }
 }
 
+// ---------- 摘要解析纯函数 ----------
+
+/**
+ * 把 summary Markdown 解析成 { preamble, sections:[{title, body}] }。
+ * 契约固定六节 `## 标题`；同时容忍 `###`。
+ */
+export function parseSummaryMarkdown(src) {
+  const lines = stripMachineComment(src).replace(/\r\n?/g, '\n').split('\n');
+  const sections = [];
+  const preamble = [];
+  let current = null;
+  for (const line of lines) {
+    const match = /^#{2,3}\s+(.+?)\s*$/.exec(line);
+    if (match) {
+      current = { title: match[1].trim(), body: [] };
+      sections.push(current);
+      continue;
+    }
+    if (current) current.body.push(line);
+    else preamble.push(line);
+  }
+  return {
+    preamble: preamble.join('\n').trim(),
+    sections: sections.map((section) => ({ title: section.title, body: section.body.join('\n').trim() })),
+  };
+}
+
+/** 去掉行内 Markdown 标记，用于「一句话结论」高亮块。 */
+export function plainInlineMarkdown(text) {
+  return String(text || '')
+    .replace(/\[([^\]]*)\]\([^)]*\)/g, '$1')
+    .replace(/[*_`>#]/g, '')
+    .replace(/^\s*[-+]\s+/gm, '')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+/** 从解析结果里取「一句话结论」的纯文本（找不到返回空串）。 */
+export function summaryOneLine(parsed) {
+  const section = (parsed?.sections || []).find((item) => /一句话结论/.test(item.title));
+  if (!section) return '';
+  return plainInlineMarkdown(section.body).slice(0, 160);
+}
+
+/** 除「一句话结论」外的其余小节（一句话结论单独做高亮块）。 */
+export function summaryBodySections(parsed) {
+  return (parsed?.sections || []).filter((item) => !/一句话结论/.test(item.title));
+}
+
+/** 折叠按钮的字符与 title（纯函数，便于单测折叠状态）。 */
+export function summaryToggleLabel(collapsed) {
+  return collapsed ? '+' : '−';
+}
+
+export function summaryToggleTitle(collapsed) {
+  return collapsed ? '展开摘要' : '折叠摘要';
+}
+
+/** 缓存小字：「缓存 · 生成于 MM-DD HH:mm」。 */
+export function summaryCacheLabel(entry) {
+  if (!entry || !entry.createdAt) return '缓存';
+  return `缓存 · 生成于 ${formatTime(entry.createdAt)}`;
+}
+
+/** 通用 SSE 读取循环（解释 / 翻译 / 区域 / 摘要共用）。 */
+export async function consumeEventStream(res, onEvent, { onParseError } = {}) {
+  if (!res || !res.body) throw new Error('当前环境不支持流式响应');
+  const reader = res.body.getReader();
+  const decoder = new TextDecoder();
+  const parser = createSSEParser(onEvent, onParseError);
+  while (true) {
+    const { value, done } = await reader.read();
+    if (done) break;
+    parser.feed(decoder.decode(value, { stream: true }));
+  }
+  parser.feed(decoder.decode());
+  parser.flush();
+}
+
 // ---------- 模块状态 ----------
 
 let deps = {
@@ -270,6 +358,7 @@ let deps = {
   onTermJump: null,
   onJumpEntry: null,
   onAnnotationJump: null,
+  onOpenSummary: null,
   onEntrySaved: null,
   toast: () => {},
   embedded: false,
@@ -448,8 +537,13 @@ export async function explainRegion({ page, rect, force = false } = {}) {
 /** 直接打开一条已有条目（历史 / 原文标记），不发请求。 */
 export function openEntry(entry) {
   if (!entry) return;
-  abortCurrentRequest();
   const kind = resolveKind(null, entry, 'explain');
+  if (kind === 'summary') {
+    // 摘要没有「当前句」线程语义：滚到摘要卡并展开（app 侧处理）
+    if (deps.onOpenSummary) deps.onOpenSummary(entry);
+    return;
+  }
+  abortCurrentRequest();
   const sel = {
     page: entry.page || 1,
     paraId: entry.paraId || '',
@@ -624,26 +718,17 @@ async function startRequest(req, { force = false } = {}) {
       const info = res ? await readJsonSafe(res) : null;
       throw makeError(info?.error?.message || `请求失败（HTTP ${res?.status ?? '网络错误'}）`, info?.error?.code);
     }
-    if (!res.body) throw makeError('当前环境不支持流式响应');
-
-    const reader = res.body.getReader();
-    const decoder = new TextDecoder();
-    const parser = createSSEParser(
+    await consumeEventStream(
+      res,
       (ev) => {
         if (current?.token === token) handleEvent(ev);
       },
-      (err, payload) => {
-        console.warn('[paper-reader] SSE 解析失败', err, payload);
+      {
+        onParseError: (err, payload) => {
+          console.warn('[paper-reader] SSE 解析失败', err, payload);
+        },
       }
     );
-
-    while (true) {
-      const { value, done } = await reader.read();
-      if (done) break;
-      parser.feed(decoder.decode(value, { stream: true }));
-    }
-    parser.feed(decoder.decode());
-    parser.flush();
 
     if (controller.signal.aborted) return;
     if (current?.status === 'streaming' || current?.status === 'waiting') {
@@ -1063,6 +1148,7 @@ function sendToChat() {
 
 function historyQuote(entry) {
   const kind = resolveKind(null, entry, 'explain');
+  if (kind === 'summary') return '整篇论文的结构化摘要';
   if (kind === 'region') {
     const rect = Array.isArray(entry.rect) ? entry.rect.map(Number) : null;
     if (entry.regionText) return entry.regionText;
@@ -1106,10 +1192,20 @@ function renderHistory() {
     const meta = h('div', 'history-meta');
     const label = h('span', clsForKind(kind), kindLabel(kind));
     meta.appendChild(label);
-    meta.appendChild(h('span', '', `第 ${entry.page || '?'} 页`));
+    if (kind !== 'summary') meta.appendChild(h('span', '', `第 ${entry.page || '?'} 页`));
     meta.appendChild(h('span', '', formatTime(entry.createdAt)));
     if (Number(entry.hitCount) > 0) {
-      meta.appendChild(h('span', '', kind === 'translate' ? `已翻译 ${entry.hitCount} 次` : `已解释 ${entry.hitCount} 次`));
+      meta.appendChild(
+        h(
+          'span',
+          '',
+          kind === 'translate'
+            ? `已翻译 ${entry.hitCount} 次`
+            : kind === 'summary'
+              ? `已生成 ${entry.hitCount} 次`
+              : `已解释 ${entry.hitCount} 次`
+        )
+      );
     }
     if (isOldRecipe(entry.recipe, kind)) meta.appendChild(h('span', 'badge', `旧配方 ${entry.recipe}`));
     item.appendChild(meta);
@@ -1121,6 +1217,7 @@ function renderHistory() {
 function clsForKind(kind) {
   if (kind === 'translate') return 'badge badge-translate';
   if (kind === 'region') return 'badge badge-region';
+  if (kind === 'summary') return 'badge badge-summary';
   return 'badge';
 }
 
@@ -1143,6 +1240,10 @@ async function loadHistory() {
 
 function openHistoryEntry(entry) {
   markActiveHistory(entry.id);
+  if (resolveKind(null, entry, 'explain') === 'summary') {
+    if (deps.onOpenSummary) deps.onOpenSummary(entry);
+    return;
+  }
   if (deps.onJumpEntry) deps.onJumpEntry(entry);
   openEntry(entry);
 }

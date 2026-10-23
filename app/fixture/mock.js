@@ -26,6 +26,11 @@ const liveEntries = [];
 const liveTerms = new Map();
 let structureCache = null;
 let annotationCache = null;
+let summaryState = null;
+let summaryLoaded = false;
+let summaryAttempts = 0;
+const SUMMARY_EMPTY = new URLSearchParams(location.search).get('nosummary') === '1';
+const SUMMARY_ERROR_ONCE = new URLSearchParams(location.search).get('sumerr') === '1';
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
@@ -123,6 +128,107 @@ function buildMockRegionAnswer(regionText, page, rect) {
 
 ### 3. 在论证中的位置
 （模拟）演示用回答。`;
+}
+
+// ---------- 结构化摘要（fixture） ----------
+
+const FIXTURE_SUMMARY_SECTIONS = [
+  '## 一句话结论',
+  '值得细读：这是 Transformer 的开山之作，若你研究序列建模或注意力机制属于必读；只做图像任务可略读。',
+  '',
+  '## 研究问题',
+  '- 能否完全抛弃循环与卷积，只用注意力完成序列转导？',
+  '- 纯注意力模型能否同时做到质量更高、并行度更好、训练更便宜？',
+  '',
+  '## 数据与样本',
+  '- WMT 2014 英德（约 450 万句对）与英法（约 3600 万句对）。',
+  '- 使用 BPE / word-piece 子词切分；8 张 P100 GPU 训练。',
+  '',
+  '## 方法',
+  '- 编码器/解码器各 6 层，多头自注意力 + 前馈网络 + 残差连接 + 层归一化。',
+  '- 缩放点积注意力与多头注意力；正弦位置编码。',
+  '',
+  '## 主要结论',
+  '- 英德 BLEU 28.4、英法 BLEU 41.8，超过此前最佳结果。',
+  '- 训练时间显著缩短（3.5 天 / 8 GPU）。',
+  '',
+  '## 局限与存疑',
+  '- 自注意力对序列长度是 O(n²)，长文档场景受限。',
+  '- 论文中未明确小数据任务上的超参可迁移性。',
+  '',
+  '> （fixture 生成）细节请以原文为准。',
+].join('\n');
+
+function buildMockSummary(force) {
+  const suffix = force ? '（fixture 重新生成版本）' : '（fixture 摘要）';
+  return FIXTURE_SUMMARY_SECTIONS.replace('值得细读：这是 Transformer 的开山之作', `值得细读${suffix}：这是 Transformer 的开山之作`);
+}
+
+async function ensureSummaryLoaded() {
+  if (summaryLoaded) return;
+  summaryLoaded = true;
+  if (SUMMARY_EMPTY) {
+    summaryState = null;
+    return;
+  }
+  try {
+    const payload = await getJSON('fixture/summary.json');
+    summaryState = payload?.entry || null;
+  } catch (err) {
+    summaryState = null;
+  }
+}
+
+async function mockSummarize(body) {
+  await ensureSummaryLoaded();
+  const force = !!body?.force;
+  const docId = body?.docId || 'demo';
+  if (SUMMARY_ERROR_ONCE && summaryAttempts++ === 0) {
+    return sseResponse(async (push) => {
+      await sleep(260);
+      push({ type: 'error', kind: 'summary', code: 'llm-failed', message: '（fixture）模拟摘要生成失败，请重试' });
+    });
+  }
+  if (!force && summaryState && summaryState.answer) {
+    summaryState = {
+      ...summaryState,
+      hitCount: (summaryState.hitCount || 0) + 1,
+      lastHitAt: new Date().toISOString(),
+    };
+    return sseResponse(async (push) => {
+      push({ type: 'meta', kind: 'summary', cached: true, id: summaryState.id, hitCount: summaryState.hitCount });
+      await sleep(120);
+      push({ type: 'done', entry: summaryState });
+    });
+  }
+  const answer = buildMockSummary(force);
+  const entry = {
+    id: `e_summary_${Date.now().toString(36)}`,
+    key: 'mock-summary-key',
+    recipe: 'summary-v1',
+    kind: 'summary',
+    docId,
+    page: 1,
+    paraId: '',
+    selText: '',
+    provider: 'fixture',
+    model: 'fixture-mock',
+    answer,
+    createdAt: new Date().toISOString(),
+    hitCount: 0,
+    lastHitAt: null,
+    supersedes: summaryState?.id || null,
+  };
+  return sseResponse(async (push) => {
+    push({ type: 'meta', kind: 'summary', cached: false, id: entry.id, key: entry.key });
+    await sleep(160);
+    for (const chunk of chunkText(answer, 22)) {
+      push({ type: 'delta', text: chunk });
+      await sleep(28);
+    }
+    summaryState = entry;
+    push({ type: 'done', entry });
+  });
 }
 
 // ---------- 术语累积（模拟宿主从解释结果里解析 terms） ----------
@@ -418,9 +524,24 @@ export function createApi() {
     },
 
     async getIndex() {
+      await ensureSummaryLoaded();
       const payload = await getJSON('fixture/explanations-index.json');
+      const summaryIndex = summaryState
+        ? [{
+            id: summaryState.id,
+            key: summaryState.key,
+            paraId: '',
+            page: 1,
+            selText: '',
+            createdAt: summaryState.createdAt,
+            hitCount: summaryState.hitCount,
+            recipe: summaryState.recipe,
+            kind: 'summary',
+          }]
+        : [];
       return {
         index: [
+          ...summaryIndex,
           ...liveEntries.map((item) => ({
             id: item.id,
             key: item.key,
@@ -440,8 +561,24 @@ export function createApi() {
     },
 
     async getExplanations() {
+      await ensureSummaryLoaded();
       const payload = await getJSON('fixture/explanations.json');
-      return { entries: [...liveEntries, ...(payload.entries || [])] };
+      return {
+        entries: [
+          ...(summaryState ? [summaryState] : []),
+          ...liveEntries,
+          ...(payload.entries || []),
+        ],
+      };
+    },
+
+    async getSummary() {
+      await ensureSummaryLoaded();
+      return { entry: summaryState };
+    },
+
+    summarizeStream(body) {
+      return mockSummarize(body);
     },
 
     async getLinks() {

@@ -52,6 +52,19 @@
     <main class="main">
       <section id="paper-area" class="paper-area">
         <div id="paper-scroll" class="paper-scroll" tabindex="0">
+          <section id="summary-card" class="summary-card" hidden aria-label="结构化摘要">
+            <div class="summary-head">
+              <div class="summary-head-left">
+                <span class="summary-title">结构化摘要</span>
+                <span id="summary-meta" class="summary-meta"></span>
+              </div>
+              <div class="summary-head-actions">
+                <button id="summary-regen" class="btn btn-ghost" type="button" hidden>重新生成</button>
+                <button id="summary-toggle" class="icon-btn" type="button" aria-expanded="true" title="折叠摘要" aria-label="折叠摘要">−</button>
+              </div>
+            </div>
+            <div id="summary-body" class="summary-body"></div>
+          </section>
           <div id="paper-content" class="paper-content"></div>
         </div>
 

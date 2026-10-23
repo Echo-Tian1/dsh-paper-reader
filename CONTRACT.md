@@ -168,6 +168,18 @@ data: {"type":"error","code":"llm-failed","message":"..."}
 目标语言自动判定：段落 CJK 占比 < 0.5 → 译成中文；≥ 0.5 → 译成英文。
 输出为纯 Markdown 译文（无三段式、无解说），公式符号按原文保留。
 
+### `POST /api/summarize`
+整篇论文的结构化摘要（一次生成、永久缓存）。请求：`{ "docId": "...", "force": false }`
+响应与 `/api/explain` 相同的 SSE 形状，`meta.kind = "summary"`，`done.entry.kind = "summary"`。
+
+- entry：`{ id, key, recipe:"summary-v1", kind:"summary", docId, page:1, paraId:"", selText:"",
+  provider, model, answer, createdAt, hitCount, lastHitAt, supersedes }`（`answer` 是 Markdown）
+- 缓存键：`sha256(docId + '|summary-v1|' + sha1(摘要源材料))`；源材料 = 标题 + 摘要/首段 + 目录章节 + 每节首段（截断），
+  总长 ≤ 6000 字。论文内容变了（重新抽取）才会 miss。
+- 输出 Markdown 固定六节：`## 一句话结论`（≤60 字，直接回答「值不值得细读」）、`## 研究问题`、`## 数据与样本`、
+  `## 方法`、`## 主要结论`、`## 局限与存疑`；每节 2–5 条要点；材料里没有的写「论文中未明确」。
+- 额外接口 `GET /api/docs/<id>/summary` → `{ entry: <最新 summary 条目> | null }`，供页面首次打开时零成本显示缓存。
+
 ### `POST /api/explain-region`
 框选区域（公式/图）解释。请求：
 `{ "docId": "...", "page": 4, "rect": [x0,y0,x1,y1], "force": false }`（rect 为 PDF 点坐标，原点左上）

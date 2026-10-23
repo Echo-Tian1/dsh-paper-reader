@@ -31,6 +31,7 @@ import {
   deleteAnnotation,
   docPaths,
   isDocId,
+  latestSummary,
   linksPath,
   newAnnotationId,
   readAnnotations,
@@ -48,7 +49,7 @@ import {
   updateUiState,
 } from './store.js'
 import { extractLinksOnly, ingestBytes, ingestPath, probePython, readJsonBody, readRequestBody } from './ingest.js'
-import { serveExplain, serveRegion, serveTranslate } from './explain.js'
+import { serveExplain, serveRegion, serveSummarize, serveTranslate } from './explain.js'
 
 const HERE = path.dirname(fileURLToPath(import.meta.url))
 
@@ -329,6 +330,13 @@ export function createApp({ ctx, config = {}, env = process.env }) {
       return
     }
     respondJson(res, 200, { entries })
+  }
+
+  /** GET /api/docs/<id>/summary：最新 summary 条目；没有（含老数据）→ {entry:null}。 */
+  async function handleSummaryGet(req, res, id) {
+    await requireStructure(id)
+    const entries = await readExplanations(id, env)
+    respondJson(res, 200, { entry: latestSummary(entries) ?? null })
   }
 
   /** GET /api/docs/<id>/terms：术语表（按 count 降序、updatedAt 降序）。 */
@@ -614,6 +622,11 @@ export function createApp({ ctx, config = {}, env = process.env }) {
       await serveExplain({ ctx, config: cfg, env, req, res })
       return
     }
+    if (pathname === '/api/summarize') {
+      if (method !== 'POST') return methodNotAllowed(res, method)
+      await serveSummarize({ ctx, config: cfg, env, req, res })
+      return
+    }
     if (pathname === '/api/translate') {
       if (method !== 'POST') return methodNotAllowed(res, method)
       await serveTranslate({ ctx, config: cfg, env, req, res })
@@ -661,6 +674,11 @@ export function createApp({ ctx, config = {}, env = process.env }) {
     if (links) {
       if (method !== 'GET') return methodNotAllowed(res, method)
       return handleLinks(req, res, links[1])
+    }
+    const summary = /^\/api\/docs\/([0-9a-f]{16})\/summary$/.exec(pathname)
+    if (summary) {
+      if (method !== 'GET') return methodNotAllowed(res, method)
+      return handleSummaryGet(req, res, summary[1])
     }
     const notes = /^\/api\/docs\/([0-9a-f]{16})\/notes\.md$/.exec(pathname)
     if (notes) {

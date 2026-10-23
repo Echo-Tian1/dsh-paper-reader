@@ -511,6 +511,7 @@ let searchToken = 0;
 let linksByPage = {};
 let linksEnabled = false;
 let annotations = [];
+let summaryCardEl = null;
 
 const scaleQueued = { value: false };
 
@@ -716,6 +717,7 @@ function applyScaleNow() {
     page.wrap.style.width = `${Math.round(scaleTargetWidth)}px`;
     page.wrap.style.height = `${Math.round((page.h || 792) * s)}px`;
   }
+  if (summaryCardEl) summaryCardEl.style.width = `${Math.round(scaleTargetWidth)}px`;
   if (zoomRestore) restoreReadingAnchor();
   updateCurrentPage(true);
 }
@@ -1675,6 +1677,22 @@ export function goToAdjacentPage(delta) {
 /** 直接设置滚动位置（返回栈恢复用）。 */
 export function setScrollTop(value) {
   if (scrollEl) scrollEl.scrollTop = Math.max(0, Number(value) || 0);
+}
+
+/** 绑定论文区顶部的摘要卡（它是 #paper-scroll 的静态子节点，随缩放同步宽度）。 */
+export function bindSummaryCard(el) {
+  summaryCardEl = el || null;
+  if (!summaryCardEl || !scrollEl || !structure) return;
+  const width = scaleTargetWidth || measureTargetWidth();
+  if (width) summaryCardEl.style.width = `${Math.round(width)}px`;
+}
+
+/** 把摘要卡滚到可视区顶部（历史里点 summary 条目用）。 */
+export function scrollToSummary() {
+  if (!summaryCardEl || !scrollEl) return false;
+  const top = summaryCardEl.getBoundingClientRect().top - scrollEl.getBoundingClientRect().top + scrollEl.scrollTop - 10;
+  scrollEl.scrollTo({ top: Math.max(0, top), behavior: 'auto' });
+  return true;
 }
 
 /** 当前滚动位置（供 ui-state 持久化）。 */

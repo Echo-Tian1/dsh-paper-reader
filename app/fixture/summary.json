@@ -1,0 +1,19 @@
+{
+ "entry": {
+  "id": "e_summary_fixture01",
+  "key": "summary-fixture-key",
+  "recipe": "summary-v1",
+  "kind": "summary",
+  "docId": "demo",
+  "page": 1,
+  "paraId": "",
+  "selText": "",
+  "provider": "fixture",
+  "model": "fixture-mock",
+  "answer": "## 一句话结论\n值得细读：这是 Transformer 的开山之作，若你研究序列建模或注意力机制属于必读；只做图像任务可略读。\n\n## 研究问题\n- 能否完全抛弃循环（recurrence）与卷积（convolution），只用注意力机制完成序列转导？\n- 在机器翻译等任务上，纯注意力模型能否同时做到质量更高、并行度更好、训练更便宜？\n\n## 数据与样本\n- WMT 2014 英德（约 450 万句对）与英法（约 3600 万句对）翻译任务。\n- 使用 BPE / word-piece 子词切分；训练与推理在 8 张 P100 GPU 上完成。\n- 论文中未明确给出数据清洗的完整细节。\n\n## 方法\n- 编码器与解码器各 6 层，每层由多头自注意力与前馈网络组成，并带残差连接与层归一化。\n- 提出缩放点积注意力 Attention(Q,K,V)=softmax(QKᵀ/√dₖ)V，以及多头注意力。\n- 位置信息用正弦位置编码注入；训练使用 Adam 与 warmup、label smoothing。\n\n## 主要结论\n- WMT 2014 英德 BLEU 28.4、英法 BLEU 41.8，均超过此前最佳结果（集成模型之外）。\n- 训练时间显著缩短（约 3.5 天 / 8 GPU）；模型可并行处理所有位置。\n- 注意力可视化显示不同头学到了不同的句法/指代关系。\n\n## 局限与存疑\n- 自注意力对序列长度的计算与内存是 O(n²)，长文档场景受限。\n- 论文中未明确说明超参数在小数据任务上的可迁移性；复现细节（如 warmup 步数）依赖附录。\n- 摘要由模型生成，细节请以原文为准。\n",
+  "createdAt": "2026-10-22T07:00:00.000Z",
+  "hitCount": 1,
+  "lastHitAt": "2026-10-22T07:30:00.000Z",
+  "supersedes": null
+ }
+}
