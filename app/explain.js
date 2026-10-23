@@ -331,9 +331,22 @@ export function init(options = {}) {
     termsList: document.getElementById('terms-list'),
     termsExport: document.getElementById('terms-export'),
   };
-  dom.tabCurrent.addEventListener('click', () => showTab('current'));
-  dom.tabHistory.addEventListener('click', () => showTab('history'));
-  if (dom.tabTerms) dom.tabTerms.addEventListener('click', () => showTab('terms'));
+  // 页签用事件委托：即使某个按钮的独立监听没挂上、或按钮被重新渲染，点击仍然生效。
+  const tabRow = dom.tabCurrent?.parentElement;
+  if (tabRow) {
+    tabRow.addEventListener('click', (event) => {
+      const tab = event.target && event.target.closest ? event.target.closest('.tab') : null;
+      if (!tab) return;
+      if (tab.id === 'tab-history') showTab('history');
+      else if (tab.id === 'tab-terms') showTab('terms');
+      else if (tab.id === 'tab-current') showTab('current');
+    });
+  } else {
+    dom.tabCurrent?.addEventListener('click', () => showTab('current'));
+    dom.tabHistory?.addEventListener('click', () => showTab('history'));
+    dom.tabTerms?.addEventListener('click', () => showTab('terms'));
+  }
+  if (!dom.paneTerms) deps.toast?.('术语页签缺失：页面与脚本版本不一致，请刷新', 'error');
   renderThread();
   renderTerms();
 }

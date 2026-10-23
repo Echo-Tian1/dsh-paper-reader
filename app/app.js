@@ -15,6 +15,7 @@ const FIXTURE = params.get('fixture') === '1';
 // 正式模式下所有 HTTP 请求（含页图 <img>）都必须带上这个前缀。
 const API_BASE = '/dsh-paper-reader';
 
+const BUILD = '2026-10-23T13:20';
 const els = {};
 let appEl = null;
 let uiTimer = null;
@@ -165,9 +166,52 @@ const httpApi = {
 
 // ---------- 启动 ----------
 
+/* ------------------------------------------------------------------ *
+ * 客户端诊断：把初始化/运行期异常直接显示在页面上，并把构建号暴露出来
+ * （用户点左上角「文献阅读坞」可看到构建号与缺失节点，便于远程定位）
+ * ------------------------------------------------------------------ */
+const reportedErrors = new Set();
+function reportClientError(label, detail) {
+  const text = `${label}：${detail || '未知错误'}`;
+  if (reportedErrors.has(text)) return;
+  reportedErrors.add(text);
+  try { console.error('[paper-reader]', text); } catch (err) { /* ignore */ }
+  try { showError(`${text}（构建 ${BUILD}）`); } catch (err) { /* 页面还没准备好就只进 console */ }
+}
+
+const EXPECTED_NODES = [
+  'topbar', 'paper-area', 'paper-content', 'explain-pane',
+  'tab-current', 'tab-history', 'tab-terms',
+  'pane-current', 'pane-history', 'pane-terms',
+  'thread', 'history-list', 'terms-list',
+];
+function missingNodes() {
+  return EXPECTED_NODES.filter((id) => !document.getElementById(id));
+}
+function wireDiagnostics() {
+  window.addEventListener('error', (event) => {
+    reportClientError('脚本错误', event.message || String(event.error || ''));
+  });
+  window.addEventListener('unhandledrejection', (event) => {
+    const reason = event.reason;
+    reportClientError('异步错误', reason && reason.message ? reason.message : String(reason || ''));
+  });
+  const brand = document.querySelector('.brand');
+  if (brand) {
+    brand.style.cursor = 'pointer';
+    brand.title = '点击查看构建号与自检信息';
+    brand.addEventListener('click', () => {
+      const missing = missingNodes();
+      const activeTab = document.querySelector('.tab.active')?.id || 'none';
+      toast(`构建 ${BUILD}｜当前页签 ${activeTab}｜缺失节点：${missing.length ? missing.join('、') : '无'}`);
+    });
+  }
+}
+
 async function main() {
   cacheEls();
   wireEvents();
+  wireDiagnostics();
   updateNarrow();
 
   bridge.initBridge({ onTheme: handleHostTheme, onChatAck: handleChatAck });
@@ -181,6 +225,7 @@ async function main() {
     state.api = httpApi;
   }
 
+  try {
   explain.init({
     api: state.api,
     embedded: bridge.embedded,
@@ -201,7 +246,11 @@ async function main() {
     sendToChat: (payload) => requestChatRoute(payload),
     toast,
   });
+  } catch (err) {
+    reportClientError('解释栏初始化失败', err && err.message ? err.message : String(err));
+  }
 
+  try {
   paper.init({
     api: state.api,
     scrollEl: els.paperScroll,
@@ -227,6 +276,9 @@ async function main() {
     onRegionChange: handleRegionChange,
     toast,
   });
+  } catch (err) {
+    reportClientError('论文区初始化失败', err && err.message ? err.message : String(err));
+  }
 
   explain.setEmbedded(bridge.embedded);
 
@@ -913,6 +965,7 @@ async function probeHealth() {
 // ---------- 启动 ----------
 
 main().catch((err) => {
+  reportClientError('启动失败', err && err.message ? err.message : String(err));
   console.error('[paper-reader] 启动失败', err);
   if (els.errorbar) {
     showError(`阅读器启动失败：${err?.message || err}`, { retry: () => location.reload() });
