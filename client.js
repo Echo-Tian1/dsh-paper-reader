@@ -456,7 +456,7 @@ async function handleToChat(ctx, data, t, sendToApp) {
   }
   if (!current) {
     copyText(payload)
-    ack(false, 'no-session', steps.join(' | '))
+    ack(false, sessions ? 'no-current-session' : 'session-service-missing', steps.join(' | '))
     return
   }
 
@@ -467,8 +467,9 @@ async function handleToChat(ctx, data, t, sendToApp) {
     note('sessions.scope', error)
   }
   if (!scope) {
+    // 有些导航（子会话路由）下 current 指向的会话还没有可用的 scope 视图
     copyText(payload)
-    ack(false, 'no-scope', steps.join(' | '))
+    ack(false, 'session-scope-missing', steps.join(' | '))
     return
   }
 

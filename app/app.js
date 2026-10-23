@@ -795,8 +795,14 @@ function injectIntoParentComposer(text) {
   try {
     const doc = window.parent && window.parent !== window ? window.parent.document : null;
     if (!doc) return false;
-    const boxes = [...doc.querySelectorAll('textarea')];
-    const target = boxes.find((el) => !el.disabled && !el.readOnly && el.offsetParent !== null) || boxes[0];
+    const boxes = [...doc.querySelectorAll('textarea')].filter((el) => {
+      if (el.disabled || el.readOnly) return false;
+      const rect = el.getBoundingClientRect();
+      return rect.width > 40 && rect.height > 10;
+    });
+    // 输入框在窗口底部：取最靠下的那个（避开设置页/搜索框等其他 textarea）
+    boxes.sort((a, b) => b.getBoundingClientRect().top - a.getBoundingClientRect().top);
+    const target = boxes[0];
     if (!target) return false;
     target.focus();
     const proto = Object.getPrototypeOf(target);
@@ -815,7 +821,7 @@ function injectIntoParentComposer(text) {
 /** 宿主桥接失败时的统一兜底：先试兼容写入，再退剪贴板，并把真实原因说清楚。 */
 function fallbackChatRoute(payload, reason, detail) {
   if (injectIntoParentComposer(payload)) {
-    toast('已填入对话输入框（兼容模式）', 'info');
+    toast('已填入对话输入框', 'info');
     return;
   }
   void copyText(payload).then((ok) => {
@@ -852,10 +858,8 @@ function handleChatAck(data) {
     toast(data.mode === 'send' ? '已发送到对话' : '已填入对话输入框');
     return;
   }
-  if (data?.reason === 'no-session') {
-    toast('当前没有打开的会话，内容已复制到剪贴板', 'error');
-    return;
-  }
+  // 不管是「没找到会话」还是「桥接失败」，都先试兼容写入：
+  // 只要 DSH 窗口里有可见的输入框，就说明有会话，直接写进去最可靠。
   fallbackChatRoute(pending.payload, data?.reason, data?.detail);
 }
 
