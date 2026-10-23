@@ -78,7 +78,14 @@ const MIME = {
   '.html': 'text/html; charset=utf-8',
   '.css': 'text/css; charset=utf-8',
   '.js': 'text/javascript; charset=utf-8',
+  // KaTeX 字体（app/vendor/katex/fonts/*.woff2）
+  '.woff2': 'font/woff2',
+  '.woff': 'font/woff',
+  '.ttf': 'font/ttf',
 }
+
+/** app/ 静态目录里允许的相对路径段（安全第一：拒绝 . / .. / 空段 / 非法字符）。 */
+const APP_PATH_SEGMENT_RE = /^[A-Za-z0-9._-]+$/
 
 const JSON_HEADERS = { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' }
 /** 批注请求体上限（text/note 各 4000 字，1MB 足够）。 */
@@ -580,14 +587,18 @@ export function createApp({ ctx, config = {}, env = process.env }) {
       throw new PaperError('not-found', '静态资源路径非法', 404)
     }
     const name = decoded.replace(/^\/+/, '')
-    if (!name || name.includes('..') || !/^[A-Za-z0-9._-]+$/.test(name)) {
-      throw new PaperError('not-found', '静态资源不存在', 404)
-    }
-    const extension = path.extname(name).toLowerCase()
+    const segments = name.split('/')
+    const invalid = name === ''
+      || segments.length === 0
+      || segments.some(segment => !APP_PATH_SEGMENT_RE.test(segment) || segment === '.' || segment === '..')
+    if (invalid) throw new PaperError('not-found', '静态资源不存在', 404)
+    const extension = path.extname(segments[segments.length - 1]).toLowerCase()
     const mime = MIME[extension]
     if (!mime) throw new PaperError('not-found', '静态资源不存在', 404)
-    const file = path.join(appDir, name)
-    if (path.dirname(file) !== appDir) throw new PaperError('not-found', '静态资源不存在', 404)
+    const file = path.resolve(appDir, ...segments)
+    if (!file.startsWith(`${path.resolve(appDir)}${path.sep}`)) {
+      throw new PaperError('not-found', '静态资源不存在', 404)
+    }
     let buffer
     try {
       buffer = await fsp.readFile(file)

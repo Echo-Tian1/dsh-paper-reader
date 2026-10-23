@@ -15,16 +15,12 @@ import { fileURLToPath } from 'node:url'
 
 const HERE = path.dirname(fileURLToPath(import.meta.url))
 
-// 夹具 PDF（arXiv:1706.03762v7）不随仓库分发：放到 tests/fixtures/ 或用 PR_FIXTURE 指定；
-// 没有夹具时，依赖真实论文的用例自动 skip，其余用例照常跑。
-const FIXTURE = process.env.PR_FIXTURE || path.join(HERE, 'fixtures', '1706.03762v7.pdf')
-const HAS_FIXTURE = existsSync(FIXTURE)
-const SKIP_NO_FIXTURE = HAS_FIXTURE ? {} : { skip: '缺少夹具 PDF：把 1706.03762v7.pdf 放到 tests/fixtures/ 或设置 PR_FIXTURE' }
-
 import { apply, createApp } from '../index.js'
 import { appendExplanation, sha256 } from '../store.js'
 
-
+const FIXTURE = process.env.PR_FIXTURE || path.join(HERE, 'fixtures', '1706.03762v7.pdf')
+const HAS_FIXTURE = existsSync(FIXTURE)
+const SKIP_NO_FIXTURE = HAS_FIXTURE ? {} : { skip: '缺少夹具 PDF：把 1706.03762v7.pdf 放到 tests/fixtures/ 或设置 PR_FIXTURE' }
 const EXPLAIN_BODY = '### 1. 中译\n这是译文。\n### 2. 难点\n- 术语：attention\n### 3. 在论证中的位置\n承上启下。'
 const EXPLAIN_ANSWER = `${EXPLAIN_BODY}\n<!--terms:{"terms":[{"term":"attention","zh":"注意力","note":"按相关性加权求和的机制"}]}-->`
 const TRANSLATE_ANSWER = '我们提出 Transformer，一种完全基于注意力机制的模型架构，彻底摒弃了循环与卷积。'
@@ -169,6 +165,10 @@ describe('宿主路由（真实抽取 + 假 llm）', SKIP_NO_FIXTURE, () => {
     await writeFile(path.join(staticDir, 'index.html'), '<!doctype html><title>文献阅读坞</title>', 'utf8')
     await writeFile(path.join(staticDir, 'app.js'), 'console.log("app")', 'utf8')
     await writeFile(path.join(staticDir, 'styles.css'), 'body{}', 'utf8')
+    await mkdir(path.join(staticDir, 'vendor', 'katex', 'fonts'), { recursive: true })
+    await writeFile(path.join(staticDir, 'vendor', 'katex', 'katex.min.css'), '/* katex */', 'utf8')
+    await writeFile(path.join(staticDir, 'vendor', 'katex', 'fonts', 'KaTeX_Main-Regular.woff2'), Buffer.from([0x77, 0x4f, 0x46, 0x32]))
+    await writeFile(path.join(staticDir, 'vendor', 'katex', 'notes.txt'), 'not served', 'utf8')
     fixture = await readFile(FIXTURE)
     llm = makeLlm()
     app = createApp({
@@ -667,6 +667,28 @@ describe('宿主路由（真实抽取 + 假 llm）', SKIP_NO_FIXTURE, () => {
 
     const missing = await call(app, { url: `${PREFIX}/app/nope.js` })
     assert.equal(missing.statusCode, 404)
+
+    // KaTeX 静态子目录：多段路径 + 字体 MIME
+    const katexCss = await call(app, { url: `${PREFIX}/app/vendor/katex/katex.min.css` })
+    assert.equal(katexCss.statusCode, 200)
+    assert.equal(katexCss.headers['content-type'], 'text/css; charset=utf-8')
+    assert.equal(katexCss.headers['cache-control'], 'no-store')
+    const katexFont = await call(app, { url: `${PREFIX}/app/vendor/katex/fonts/KaTeX_Main-Regular.woff2` })
+    assert.equal(katexFont.statusCode, 200)
+    assert.equal(katexFont.headers['content-type'], 'font/woff2')
+    assert.equal(katexFont.headers['cache-control'], 'no-store')
+
+    // 安全：路径穿越 / 非法段 / 非白名单扩展名
+    for (const url of [
+      `${PREFIX}/app/../etc/passwd`,
+      `${PREFIX}/app/%2e%2e/etc/passwd`,
+      `${PREFIX}/app/vendor/%2e%2e%2fetc/passwd`,
+      `${PREFIX}/app/vendor//katex.min.css`,
+      `${PREFIX}/app/vendor/katex/notes.txt`,
+    ]) {
+      const res = await call(app, { url })
+      assert.equal(res.statusCode, 404, `应 404：${url}`)
+    }
   })
 
   it('未知文档 / 未知路由 / 非法方法', async () => {

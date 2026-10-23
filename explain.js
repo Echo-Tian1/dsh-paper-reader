@@ -66,12 +66,14 @@ export const TRANSLATE_SYSTEM_TEMPLATE = `你是一位严谨的学术翻译，�
 
 /** 框选区域解释 system。 */
 export const REGION_SYSTEM_PROMPT = `你是一位耐心的学术论文阅读助教，正在帮助中文母语读者理解论文版面里框选出来的一块区域（可能是公式、图、表或正文片段）。
-只依据给出的区域文字与上下文作答，不要编造区域之外的事实；不确定的地方明确写「不确定」。
-输出 Markdown，必须且只能包含三节：
-### 1. 这是什么
-（判断区域是公式/图/表/正文片段，概括它表达的内容；如果区域没有文字层，明确说明只能依据上下文与版面位置推测）
+区域文字层来自 PDF 抽取，可能顺序不完整、字符被拆开；其中 ^{…} 表示上标、_{…} 表示下标，这是排版还原标记，不是原文内容里真的出现的字符。
+请按下面要求作答（Markdown，必须且只能包含三节）：
+### 1. 内容还原
+（优先把区域内容还原成 LaTeX 公式，放在 $$...$$ 里；^{} / _{} 要按数学含义理解后还原为标准 LaTeX。
+如果区域含正文残片，用引用块单独列出并说明它不属于公式；如果区域不是公式（图/表/正文），说明它是什么。
+识别不确定的符号要标注「不确定」）
 ### 2. 符号与含义
-（逐条解释区域内的符号、变量、箭头、缩写；没有则写「无」）
+（逐条解释公式里的符号、变量、箭头、缩写；图/表则说明各部分含义；没有则写「无」）
 ### 3. 与上下文的关系
 （2-4 行：这块内容在所在段落/章节里承担什么作用，与前后文怎么衔接）
 不要输出开场白、总结、免责声明。`
@@ -879,25 +881,30 @@ export async function serveRegion({ ctx, config, env = process.env, req, res }) 
     return
   }
 
-  let regionText = ''
+  let extracted = null
   try {
-    const result = await extractRegion({
+    extracted = await extractRegion({
       pythonPath: config.pythonPath,
       pdfPath: paths.source,
       page,
       rect: clamped,
       timeoutMs: config.extractTimeoutMs,
     })
-    regionText = typeof result.text === 'string' ? result.text : ''
   } catch (error) {
     respondError(res, error)
     return
   }
+  // 吸附后的矩形（扩展到框选内容覆盖的完整文本行）；老格式没有 rect 时退回拖动矩形
+  const snapped = Array.isArray(extracted?.rect) && extracted.rect.length === 4
+    ? extracted.rect.map(value => Number(value))
+    : clamped
+  const regionText = typeof extracted?.text === 'string' ? extracted.text : ''
+  const regionLines = Array.isArray(extracted?.lines) ? extracted.lines : []
 
   const kind = 'region'
   const force = body.force === true
   const recipe = REGION_RECIPE
-  const rounded = clamped.map(value => Math.round(value * 100) / 100)
+  const rounded = snapped.map(value => Math.round(value * 100) / 100)
   const key = regionKey(docId, page, rounded, regionText)
   const entries = await readExplanations(docId, env)
   const latest = latestByKey(entries).get(key) ?? null
@@ -916,6 +923,9 @@ export async function serveRegion({ ctx, config, env = process.env, req, res }) 
   }
 
   const para = findParaByRect(structure.paras, page, rounded)
+  const linesBlock = regionLines.length > 0
+    ? regionLines.map(line => `[${line.kind === 'math' ? 'math' : 'text'}] ${line.text}`).join('\n')
+    : '（这块区域没有文字层，只能依据上下文与版面位置推测）'
   const { prev, next } = neighborParas(structure.paras ?? [], para?.id ?? '')
   const section = sectionOf(structure, para)
   const paraText = truncate(para?.text ?? '', PARA_TEXT_LIMIT)
@@ -923,9 +933,9 @@ export async function serveRegion({ ctx, config, env = process.env, req, res }) 
     `论文：${structure.title ?? ''}`,
     `位置：第 ${page} 页 · ${section?.title ?? '（未知章节）'}`,
     `框选区域：第 ${page} 页 [${rounded.join(', ')}]（PDF 点坐标，原点左上）`,
-    '区域文字层：',
+    '区域文字层（按行；^{} 是上标、_{} 是下标，均为排版还原标记）：',
     '<<<',
-    regionText.trim() || '（这块区域没有文字层，只能依据上下文与版面位置推测）',
+    linesBlock,
     '>>>',
     `所在段落：${paraText || '（无）'}`,
     `前一段：${truncate(prev?.text ?? '', NEIGHBOR_LIMIT) || '（无）'}`,
@@ -955,6 +965,7 @@ export async function serveRegion({ ctx, config, env = process.env, req, res }) 
     supersedes: latest?.id ?? null,
     rect: rounded,
     regionText,
+    ...(regionLines.length > 0 ? { regionLines } : {}),
   }
 
   startSse(res)

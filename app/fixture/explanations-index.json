@@ -52,10 +52,10 @@
    "recipe": "region-v1",
    "kind": "region",
    "rect": [
-    322,
-    68,
+    54,
+    64,
     558,
-    124
+    116
    ],
    "regionText": "We employ a residual connection around each of the two sub-layers, followed by layer normalization."
   },
@@ -71,9 +71,9 @@
    "kind": "region",
    "rect": [
     54,
-    66,
+    62,
     558,
-    110
+    112
    ],
    "regionText": "The encoder is composed of a stack of six identical layers, each with two sub-layers."
   }

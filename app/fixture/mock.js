@@ -103,7 +103,10 @@ function buildMockAnswer(selText) {
 - 验证点：SSE 逐字追加、Markdown 渲染、缓存命中态、错误重试。
 
 ### 3. 在论证中的位置
-（模拟）该句位于演示段落中，用于验证原文标记、历史列表与跳页高亮。`;
+（模拟）该句位于演示段落中，用于验证原文标记、历史列表与跳页高亮。
+
+公式示例：$\\mathrm{softmax}(x)_i=\\frac{e^{x_i}}{\\sum_j e^{x_j}}$
+`;
 }
 
 function buildMockTranslation(paraText) {
@@ -111,7 +114,9 @@ function buildMockTranslation(paraText) {
 
 这一段（${String(paraText || '').slice(0, 48)}……）的中文大意是：该段介绍了模型的总体结构与设计动机。
 
-> 说明：这是自测夹具生成的模拟译文，用于验证「整段翻译」链路（流式、缓存、历史徽标）。`;
+> 说明：这是自测夹具生成的模拟译文，用于验证「整段翻译」链路（流式、缓存、历史徽标）。
+
+保留公式 $\\mathrm{softmax}(QK^{T}/\\sqrt{d_k})V$。`;
 }
 
 function buildMockRegionAnswer(regionText, page, rect) {
@@ -125,6 +130,10 @@ function buildMockRegionAnswer(regionText, page, rect) {
 ### 2. 难点
 - **region**：本条目用于验证「框选区域 → 缩略图 → 历史回看」链路。
 - 区域没有文字层时，模型只能依据上下文推测（真实宿主会说明这一点）。
+
+$$
+\\mathrm{Attention}(Q,K,V)=\\mathrm{softmax}\\left(\\frac{QK^{T}}{\\sqrt{d_k}}\\right)V
+$$
 
 ### 3. 在论证中的位置
 （模拟）演示用回答。`;
@@ -146,7 +155,11 @@ const FIXTURE_SUMMARY_SECTIONS = [
   '',
   '## 方法',
   '- 编码器/解码器各 6 层，多头自注意力 + 前馈网络 + 残差连接 + 层归一化。',
-  '- 缩放点积注意力与多头注意力；正弦位置编码。',
+  '- 缩放点积注意力 $\\mathrm{Attention}(Q,K,V)=\\mathrm{softmax}(QK^{T}/\\sqrt{d_k})V$ 与多头注意力；正弦位置编码。',
+  '',
+  '$$',
+  '\\mathrm{MultiHead}(Q,K,V)=\\mathrm{Concat}(\\mathrm{head}_1,\\dots,\\mathrm{head}_h)W^{O}',
+  '$$',
   '',
   '## 主要结论',
   '- 英德 BLEU 28.4、英法 BLEU 41.8，超过此前最佳结果。',
@@ -403,13 +416,59 @@ async function mockTranslate(body) {
   });
 }
 
+function snapRegionRect(rect, regionParas) {
+  const boxes = regionParas.map((p) => p.bbox).filter((b) => Array.isArray(b) && b.length === 4);
+  if (!boxes.length) return rect.map((n) => Math.round(Number(n) * 10) / 10);
+  const x0 = Math.min(...boxes.map((b) => b[0]));
+  const y0 = Math.min(...boxes.map((b) => b[1]));
+  const x1 = Math.max(...boxes.map((b) => b[2]));
+  const y1 = Math.max(...boxes.map((b) => b[3]));
+  return [x0, y0, x1, y1].map((n) => Math.round(n * 10) / 10);
+}
+
+function buildRegionLines(rect, regionParas, pageData) {
+  const lines = [];
+  const words = Array.isArray(pageData?.words) ? pageData.words : [];
+  const inRect = words.filter(
+    (w) =>
+      Array.isArray(w) &&
+      w[0] < rect[2] &&
+      w[2] > rect[0] &&
+      w[1] < rect[3] &&
+      w[3] > rect[1]
+  );
+  const byLine = new Map();
+  for (const word of inRect) {
+    const key = Math.round(Number(word[1]) * 2) / 2;
+    if (!byLine.has(key)) byLine.set(key, []);
+    byLine.get(key).push(word);
+  }
+  for (const lineWords of [...byLine.entries()].sort((a, b) => a[0] - b[0]).map(([, list]) => list)) {
+    lineWords.sort((a, b) => a[0] - b[0]);
+    const text = lineWords.map((w) => String(w[4] ?? '')).join(' ').replace(/\s+/g, ' ').trim();
+    if (!text) continue;
+    const bbox = [
+      Math.min(...lineWords.map((w) => w[0])),
+      Math.min(...lineWords.map((w) => w[1])),
+      Math.max(...lineWords.map((w) => w[2])),
+      Math.max(...lineWords.map((w) => w[3])),
+    ];
+    lines.push({ text, kind: /[=^_√∑∫]|softmax|attention/i.test(text) ? 'math' : 'text', bbox });
+  }
+  if (!lines.length) {
+    for (const para of regionParas) {
+      lines.push({ text: para.text, kind: /[=^_√∑∫]|softmax|attention/i.test(para.text) ? 'math' : 'text', bbox: para.bbox });
+    }
+  }
+  return lines;
+}
+
 async function mockExplainRegion(body) {
   const page = Number(body?.page) || 1;
-  const rect = (Array.isArray(body?.rect) ? body.rect : []).map(Number);
+  const requestRect = (Array.isArray(body?.rect) ? body.rect : []).map(Number);
   const force = !!body?.force;
-  const key = `${page}:${rect.join(',')}`;
   const structure = await getStructureData();
-  const [x0, y0, x1, y1] = rect;
+  const [x0, y0, x1, y1] = requestRect;
   const regionParas = (structure.paras || []).filter(
     (p) =>
       Number(p.page) === page &&
@@ -419,7 +478,12 @@ async function mockExplainRegion(body) {
       p.bbox[1] < y1 &&
       p.bbox[3] > y0
   );
-  const regionText = regionParas.map((p) => p.text).join('\n');
+  // 模拟宿主吸附：把矩形扩展成相交文本行的并集（这里是段落 bbox 的并集）
+  const rect = snapRegionRect(requestRect, regionParas);
+  const pageData = await getJSON(`fixture/pages/${page}.json`).catch(() => ({ words: [] }));
+  const regionLines = buildRegionLines(rect, regionParas, pageData);
+  const regionText = regionLines.map((line) => line.text).join('\n');
+  const key = `${page}:${rect.join(',')}`;
   const cachedEntry = !force
     ? liveEntries.find((e) => e.kind === 'region' && `${e.page}:${(e.rect || []).join(',')}` === key)
     : null;
@@ -445,6 +509,7 @@ async function mockExplainRegion(body) {
     sectionId: regionParas[0]?.sectionId || '',
     rect,
     regionText,
+    regionLines,
     contextHash: 'mock-region-context',
     provider: 'fixture',
     model: 'fixture-mock',

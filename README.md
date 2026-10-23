@@ -73,6 +73,10 @@
 
 ![整段翻译](docs/screenshots/translate.png)
 
+**Shift 框选公式 → 自动吸附整行 + LaTeX 渲染成真公式**
+
+![公式渲染](docs/screenshots/formula-after.png)
+
 **Shift 框选公式区域 → 逐符号解释**
 
 ![框选公式](docs/screenshots/region-formula.png)
@@ -239,6 +243,12 @@ node app/fixture/selfcheck.mjs
 ```
 
 覆盖：抽取产物结构、逐词坐标、切句覆盖、链接抽取与惰性回填、批注 CRUD 与并发、缓存键与 supersedes、SSE 事件形状、术语合并、笔记导出注入防护、搜索结果与缩放换算、链接/批注命中、快捷键映射等。
+
+## 交互与可读性
+
+- **按钮命中区**：全部 ≥32×32（顶栏图标 34×34、页签 34 高、选区工具条 32 高），窄窗口下页签横向滚动而不压缩；
+- **公式渲染**：KaTeX 随插件分发（`app/vendor/katex/`，约 600KB），完全离线；单条公式渲染失败只回退该条，不影响整段回答；
+- **区域吸附**：框选后矩形扩展到覆盖的整行，原文区域框、缩略图、历史回看都用吸附后的位置。
 
 ## 已知边界
 

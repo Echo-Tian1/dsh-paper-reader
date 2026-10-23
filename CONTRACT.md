@@ -180,10 +180,26 @@ data: {"type":"error","code":"llm-failed","message":"..."}
   `## 方法`、`## 主要结论`、`## 局限与存疑`；每节 2–5 条要点；材料里没有的写「论文中未明确」。
 - 额外接口 `GET /api/docs/<id>/summary` → `{ entry: <最新 summary 条目> | null }`，供页面首次打开时零成本显示缓存。
 
+### `extract.py --region`（内部 CLI，宿主调用）
+```
+python3 extract.py --region <pdf> <page> <x0,y0,x1,y1>
+```
+stdout 一行 JSON：
+```json
+{ "ok": true,
+  "rect": [x0,y0,x1,y1],            // 吸附后的矩形（扩展到所选内容覆盖的完整文本行，clamp 在页内）
+  "lines": [ { "text":"Attention(Q, K, V ) = softmax(QK^T/√d_k)V", "kind":"math", "bbox":[...] } ],
+  "text": "…",                       // 行拼接（上下标用 ^{} / _{} 标注）
+  "warnings": [] }
+```
+- **吸附**：取与拖动矩形相交的所有文本行（垂直重叠 > 40%），把矩形扩展成这些行的并集；这样框边缘不会被切掉半个字符。
+- **上下标**：PyMuPDF span 的 `flags & 1` 是上标；字号 < 0.8×行内中位数且基线更低视为下标，分别包成 `^{…}` / `_{…}`。
+- **kind**：该行数学/符号字符占比高、或使用了数学字体、或居中排版 → `math`，否则 `text`；`lines` 按阅读顺序返回。
+
 ### `POST /api/explain-region`
 框选区域（公式/图）解释。请求：
 `{ "docId": "...", "page": 4, "rect": [x0,y0,x1,y1], "force": false }`（rect 为 PDF 点坐标，原点左上）
-响应同上 SSE；`meta.kind = "region"`；`done.entry.kind = "region"`，并带 `rect` 与 `regionText`。
+响应同上 SSE；`meta.kind = "region"`；`done.entry.kind = "region"`，并带 `rect`（**吸附后的矩形**，客户端用它画区域框/缩略图）与 `regionText`（带 `^{}`/`_{}` 标注）、`regionLines`（按行，含 kind）。
 宿主用 PyMuPDF 的 `clip` 抽取该区域文字层，并用与区域相交最多的段落作为上下文。
 区域没有文字层时不报错，模型只能依据上下文推测（回答里会说明）。
 
@@ -274,7 +290,10 @@ translate : sha256(docId + '|translate-v1|' + paraId + '|' + sha1(paraText))
 region    : sha256(docId + '|region-v1|' + page + '|' + rectRound1pt + '|' + sha1(regionText))
 ```
 
-## 6. 解释提示词（recipe v1）
+## 6. 解释提示词（recipe v2）
+
+**数学表达统一用 LaTeX**：行内公式写成 `$...$`，独立公式写成 `$$...$$`；不要用纯文本拼分数/上下标/根号。
+客户端用 KaTeX 渲染（离线随插件分发），宿主不做任何转换。这条适用于解释 / 翻译 / 区域解释 / 摘要。
 
 system：
 ```

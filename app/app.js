@@ -15,7 +15,7 @@ const FIXTURE = params.get('fixture') === '1';
 // 正式模式下所有 HTTP 请求（含页图 <img>）都必须带上这个前缀。
 const API_BASE = '/dsh-paper-reader';
 
-const BUILD = '2026-10-23T13:45';
+const BUILD = '2026-10-23T15:15';
 const els = {};
 let appEl = null;
 let uiTimer = null;
@@ -318,7 +318,11 @@ function wireDiagnostics() {
       const missing = missingNodes();
       const activeTab = document.querySelector('.tab.active')?.id || 'none';
       const hit = parentHitTest();
-      toast(`构建 ${BUILD}｜页签 ${activeTab}｜缺失 ${missing.length ? missing.join('、') : '无'}｜命中 ${hit}`);
+      const editor = parentComposerInfo();
+      const chat = lastChatDiag
+        ? `ack=${lastChatDiag.ack || '-'} reason=${lastChatDiag.reason || '-'} inject=${lastChatDiag.inject || '-'}`
+        : '未用过';
+      toast(`构建 ${BUILD}｜页签 ${activeTab}｜缺失 ${missing.length ? missing.join('、') : '无'}｜命中 ${hit}｜${editor}｜对话 ${chat}`);
     });
   }
 }
@@ -1163,6 +1167,44 @@ function handleHostTheme(theme) {
 /** 「转到对话」进行中的一次请求（等待宿主的 chat-ack）。 */
 let pendingChat = null;
 
+/** 最近一次「转到对话」的诊断（点左上角品牌名可看到）。 */
+let lastChatDiag = null;
+function noteChatDiag(patch) {
+  lastChatDiag = { ...(lastChatDiag || {}), ...patch, at: Date.now() };
+}
+
+/** 统计父窗口里可用的编辑器（诊断用）。 */
+function parentComposerInfo() {
+  try {
+    const doc = window.parent && window.parent !== window ? window.parent.document : null;
+    if (!doc) return 'no-parent';
+    const boxes = [...doc.querySelectorAll('textarea,[contenteditable="true"]')].filter((el) => {
+      const rect = el.getBoundingClientRect();
+      return !el.disabled && !el.readOnly && rect.width > 40 && rect.height > 10;
+    });
+    return boxes.length ? `editors:${boxes.length}` : 'editors:0';
+  } catch (err) {
+    return `editor-scan-error:${err && err.message ? err.message : err}`;
+  }
+}
+
+/** 校验文本是否已经进了父窗口某个编辑器（用来兜住「回执成功但没写进去」）。 */
+function parentComposerHas(text) {
+  try {
+    const doc = window.parent && window.parent !== window ? window.parent.document : null;
+    if (!doc) return false;
+    const needle = String(text || '').replace(/\s+/g, ' ').trim().slice(0, 24);
+    if (!needle) return false;
+    const boxes = [...doc.querySelectorAll('textarea,[contenteditable="true"]')];
+    return boxes.some((el) => {
+      const value = typeof el.value === 'string' ? el.value : el.textContent || '';
+      return value.replace(/\s+/g, ' ').includes(needle);
+    });
+  } catch (err) {
+    return false;
+  }
+}
+
 /**
  * 把文本直接写进父窗口（DSH）的编辑器。
  * 兼容兜底通道：当薄壳的会话服务桥接失败时，同源 iframe 仍可直接操作父页面 DOM。
@@ -1171,25 +1213,35 @@ let pendingChat = null;
 function injectIntoParentComposer(text) {
   try {
     const doc = window.parent && window.parent !== window ? window.parent.document : null;
-    if (!doc) return false;
-    const boxes = [...doc.querySelectorAll('textarea')].filter((el) => {
+    if (!doc) { noteChatDiag({ inject: 'no-parent' }); return false; }
+    const boxes = [...doc.querySelectorAll('textarea,[contenteditable="true"]')].filter((el) => {
       if (el.disabled || el.readOnly) return false;
       const rect = el.getBoundingClientRect();
       return rect.width > 40 && rect.height > 10;
     });
-    // 输入框在窗口底部：取最靠下的那个（避开设置页/搜索框等其他 textarea）
+    // 输入框在窗口底部：取最靠下的那个（避开设置页/搜索框等其他编辑器）
     boxes.sort((a, b) => b.getBoundingClientRect().top - a.getBoundingClientRect().top);
     const target = boxes[0];
-    if (!target) return false;
+    if (!target) { noteChatDiag({ inject: 'no-editor', editors: 0 }); return false; }
     target.focus();
-    const proto = Object.getPrototypeOf(target);
-    const setter = Object.getOwnPropertyDescriptor(proto, 'value')?.set;
-    if (setter) setter.call(target, text);
-    else target.value = text;
-    target.dispatchEvent(new Event('input', { bubbles: true }));
-    target.dispatchEvent(new Event('change', { bubbles: true }));
+    if (target.tagName === 'TEXTAREA') {
+      // React 受控 textarea：必须用原型上的 value setter，再派发 input
+      const proto = Object.getPrototypeOf(target);
+      const setter = Object.getOwnPropertyDescriptor(proto, 'value')?.set;
+      if (setter) setter.call(target, text);
+      else target.value = text;
+      target.dispatchEvent(new Event('input', { bubbles: true }));
+      target.dispatchEvent(new Event('change', { bubbles: true }));
+    } else {
+      // contenteditable：选中全部后插入文本，再派发 input
+      target.textContent = text;
+      target.dispatchEvent(new InputEvent('input', { bubbles: true, inputType: 'insertText', data: text }));
+    }
+    const landed = parentComposerHas(text);
+    noteChatDiag({ inject: landed ? 'ok' : 'written-unverified', editor: target.tagName.toLowerCase() });
     return true;
   } catch (err) {
+    noteChatDiag({ inject: `error:${err && err.message ? err.message : err}` });
     console.warn('[paper-reader] parent composer fallback failed:', err);
     return false;
   }
@@ -1197,6 +1249,7 @@ function injectIntoParentComposer(text) {
 
 /** 宿主桥接失败时的统一兜底：先试兼容写入，再退剪贴板，并把真实原因说清楚。 */
 function fallbackChatRoute(payload, reason, detail) {
+  noteChatDiag({ ack: 'fail', reason: reason || '', detail: detail || '' });
   if (injectIntoParentComposer(payload)) {
     toast('已填入对话输入框', 'info');
     return;
@@ -1232,7 +1285,14 @@ function handleChatAck(data) {
   clearTimeout(pending.timer);
   pendingChat = null;
   if (data?.ok) {
-    toast(data.mode === 'send' ? '已发送到对话' : '已填入对话输入框');
+    noteChatDiag({ ack: 'ok', mode: data.mode, detail: data.detail || '' });
+    // 回执说成功，但 250ms 后父窗口输入框里还没有这段文字 → 兼容补写
+    setTimeout(() => {
+      if (parentComposerHas(pending.payload)) return;
+      if (injectIntoParentComposer(pending.payload) && !data.focus) toast('已填入对话输入框（兼容写入）', 'info');
+    }, 250);
+    if (data.focus) toast('已填入对话输入框；退出专注阅读（Esc）即可看到', 'info');
+    else toast(data.mode === 'send' ? '已发送到对话' : '已填入对话输入框');
     return;
   }
   // 不管是「没找到会话」还是「桥接失败」，都先试兼容写入：

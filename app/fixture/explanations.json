@@ -15,7 +15,7 @@
    "contextHash": "k222222222222222222222222222222222222222222222222222222222222222",
    "provider": "fixture",
    "model": "fixture-mock",
-   "answer": "### 1. 中译\n注意力机制已经成为各种任务中引人注目的序列建模与转导模型不可或缺的一部分。\n\n### 2. 难点\n- **transduction models**：转导模型，指从输入序列直接产生输出序列的模型（如机器翻译）。\n- **integral part**：不可或缺的组成部分；此处不是数学意义上的“积分”。\n- 句法：`have become an integral part of ...` 为现在完成时，强调持续至今的地位。\n\n### 3. 在论证中的位置\n本句位于 Introduction 开头，先把注意力机制的重要性立住，为后文提出完全基于注意力的 Transformer 做铺垫。下一句会直接引出本文的模型。",
+   "answer": "### 1. 中译\n注意力机制已经成为各种任务中引人注目的序列建模与转导模型不可或缺的一部分。\n\n### 2. 难点\n- **transduction models**：转导模型，指从输入序列直接产生输出序列的模型（如机器翻译）。\n- **integral part**：不可或缺的组成部分；此处不是数学意义上的“积分”。\n- 句法：`have become an integral part of ...` 为现在完成时，强调持续至今的地位。\n\n### 3. 在论证中的位置\n本句位于 Introduction 开头，先把注意力机制的重要性立住，为后文提出完全基于注意力的 Transformer 做铺垫。下一句会直接引出本文的模型。\n\n注意力（attention）的缩放点积形式：\n\n$$\n\\mathrm{Attention}(Q,K,V)=\\mathrm{softmax}\\left(\\frac{QK^{T}}{\\sqrt{d_k}}\\right)V\n$$",
    "createdAt": "2026-10-22T07:30:00.000Z",
    "hitCount": 2,
    "lastHitAt": "2026-10-22T08:10:00.000Z",
@@ -55,7 +55,7 @@
    "contextHash": "k666666666666666666666666666666666666666666666666666666666666666",
    "provider": "fixture",
    "model": "fixture-mock",
-   "answer": "**（fixture 模拟译文）整段译文：**\n\n这段话描述了 Transformer 的整体架构：它使用堆叠的自注意力层与前馈网络层，分别构成编码器与解码器。\n\n> 说明：这是自测夹具生成的模拟译文，用于验证「整段翻译」链路（流式、缓存、历史徽标）。",
+   "answer": "**（fixture 模拟译文）整段译文：**\n\n这段话描述了 Transformer 的整体架构：它使用堆叠的自注意力层与前馈网络层，分别构成编码器与解码器。\n\n> 说明：这是自测夹具生成的模拟译文，用于验证「整段翻译」链路（流式、缓存、历史徽标）。\n\n译文里保留公式 $\\sqrt{d_k}$ 与 $\\mathrm{softmax}$。",
    "createdAt": "2026-10-22T07:45:00.000Z",
    "hitCount": 1,
    "lastHitAt": "2026-10-22T08:00:00.000Z",
@@ -74,19 +74,41 @@
    "sectionId": "s2",
    "contextHash": "k888888888888888888888888888888888888888888888888888888888888888",
    "rect": [
-    322,
-    68,
+    54,
+    64,
     558,
-    124
+    116
    ],
    "regionText": "We employ a residual connection around each of the two sub-layers, followed by layer normalization.",
    "provider": "fixture",
    "model": "fixture-mock",
-   "answer": "### 1. 区域内容\n该区域包含一句关于残差连接与层归一化的描述：`We employ a residual connection around each of the two sub-layers, followed by layer normalization.`\n\n### 2. 难点\n- **residual connection**：残差连接，缓解深层网络梯度消失。\n- **layer normalization**：层归一化，对每个样本的特征维度做归一化。\n\n### 3. 在论证中的位置\n这句话交代了 Transformer 每个子层后处理的标准做法，是后续公式 (1)(2) 的前置说明。",
+   "answer": "### 1. 区域内容\n该区域包含一句关于残差连接与层归一化的描述：`We employ a residual connection around each of the two sub-layers, followed by layer normalization.`\n\n### 2. 难点\n- **residual connection**：残差连接，缓解深层网络梯度消失。\n- **layer normalization**：层归一化，对每个样本的特征维度做归一化。\n\n### 3. 在论证中的位置\n这句话交代了 Transformer 每个子层后处理的标准做法，是后续公式 (1)(2) 的前置说明。\n\n区域中的公式：\n\n$$\n\\mathrm{softmax}(x)_i=\\frac{e^{x_i}}{\\sum_j e^{x_j}}\n$$",
    "createdAt": "2026-10-22T07:50:00.000Z",
    "hitCount": 1,
    "lastHitAt": null,
-   "supersedes": null
+   "supersedes": null,
+   "regionLines": [
+    {
+     "text": "We employ a residual connection around each of the two sub-layers, followed by layer normalization.",
+     "kind": "text",
+     "bbox": [
+      54,
+      72,
+      558,
+      86
+     ]
+    },
+    {
+     "text": "softmax(QK^{T}/\\sqrt{d_k})V",
+     "kind": "math",
+     "bbox": [
+      54,
+      90,
+      300,
+      104
+     ]
+    }
+   ]
   },
   {
    "id": "e_region02",
@@ -102,18 +124,30 @@
    "contextHash": "kaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
    "rect": [
     54,
-    66,
+    62,
     558,
-    110
+    112
    ],
    "regionText": "The encoder is composed of a stack of six identical layers, each with two sub-layers.",
    "provider": "fixture",
    "model": "fixture-mock",
-   "answer": "### 1. 区域内容\n区域文字：`The encoder is composed of a stack of six identical layers, each with two sub-layers.`\n\n### 2. 难点\n- **stack**：堆叠；`identical` 指结构相同，不是参数共享。\n- **sub-layer**：子层（自注意力 / 前馈网络）。\n\n### 3. 在论证中的位置\n本句定义编码器栈的层数，是理解 2.1 节结构描述的基础。",
+   "answer": "### 1. 区域内容\n区域文字：`The encoder is composed of a stack of six identical layers, each with two sub-layers.`\n\n### 2. 难点\n- **stack**：堆叠；`identical` 指结构相同，不是参数共享。\n- **sub-layer**：子层（自注意力 / 前馈网络）。\n\n### 3. 在论证中的位置\n本句定义编码器栈的层数，是理解 2.1 节结构描述的基础。\n\n子层输出可写作 $\\mathrm{LayerNorm}(x+\\mathrm{Sublayer}(x))$。",
    "createdAt": "2026-10-22T07:55:00.000Z",
    "hitCount": 0,
    "lastHitAt": null,
-   "supersedes": null
+   "supersedes": null,
+   "regionLines": [
+    {
+     "text": "The encoder is composed of a stack of six identical layers, each with two sub-layers.",
+     "kind": "text",
+     "bbox": [
+      54,
+      72,
+      558,
+      100
+     ]
+    }
+   ]
   }
  ]
 }

@@ -413,7 +413,11 @@ window.__ModuleLoader__.load({
 async function handleToChat(ctx, data, t, sendToApp) {
   const payload = typeof data.payload === 'string' ? data.payload : ''
   const mode = data.mode === 'send' ? 'send' : 'draft'
-  const ack = (ok, reason, detail) => sendToApp({ source: 'pr-host', type: 'chat-ack', ok, mode, reason, detail })
+  const ack = (ok, reason, detail) => sendToApp({
+    source: 'pr-host', type: 'chat-ack', ok, mode, reason, detail,
+    // 专注模式下主对话被铺满的坞盖住：回执里带上，阅读器好提示「退出专注后可见」
+    focus: Boolean(state.focus),
+  })
   if (payload === '') { ack(false, 'empty'); return }
 
   const steps = []

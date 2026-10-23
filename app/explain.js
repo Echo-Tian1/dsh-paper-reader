@@ -31,9 +31,46 @@ export function stripMachineComment(text) {
   return out.replace(/[ \t]+\n/g, '\n').trimEnd();
 }
 
-function renderInline(text) {
+// ---------- Markdown + KaTeX ----------
+
+const MATH_SIGNAL_RE = /[\\^_{}=<>+\-*/|]|[a-zA-Z]/;
+
+/** KaTeX 实例：优先 options.katex（单测注入），否则用页面上的全局 katex。 */
+function getKatex(options) {
+  if (options && options.katex) return options.katex;
+  if (typeof katex !== 'undefined' && katex && typeof katex.renderToString === 'function') return katex;
+  return null;
+}
+
+/**
+ * 渲染一条公式；失败/KaTeX 未加载时返回 null，调用方回退原文。
+ * 导出便于单测；不抛异常（一条坏公式不能炸掉整条回答）。
+ */
+export function renderMathHtml(tex, displayMode, options = {}) {
+  const impl = getKatex(options);
+  const source = String(tex == null ? '' : tex).trim();
+  if (!impl || !source) return null;
+  try {
+    return impl.renderToString(source, {
+      displayMode: !!displayMode,
+      throwOnError: true,
+      errorColor: 'inherit',
+      strict: 'ignore',
+      trust: false,
+      output: 'html',
+    });
+  } catch (err) {
+    return null;
+  }
+}
+
+function mathFallbackHtml(raw) {
+  return `<span class="math-fallback">${escapeHtml(raw)}</span>`;
+}
+
+/** 行内文本（非 code / 非公式）的 Markdown 子集格式化。 */
+function renderInlineText(text) {
   let s = escapeHtml(text);
-  s = s.replace(/`([^`\n]+)`/g, (_, code) => `<code>${code}</code>`);
   s = s.replace(/\*\*([^*\n]+)\*\*/g, '<strong>$1</strong>');
   s = s.replace(/__([^_\n]+)__/g, '<strong>$1</strong>');
   s = s.replace(/(^|[\s(（])\*([^*\n]+)\*(?=$|[\s).,;:!?，。；：！？）])/g, '$1<em>$2</em>');
@@ -42,11 +79,151 @@ function renderInline(text) {
 }
 
 /**
- * 约 60 行的 Markdown 子集渲染器。
- * 支持：### 标题、**粗体**、*斜体*、`行内代码`、- / * 无序列表、1. 有序列表、空行分段、段内换行。
- * 安全：整段文本先 HTML 转义，再应用标记；不会插入用户提供的原始 HTML。
+ * 找行内 `$...$` 的结束位置（-1 = 不是公式）。
+ * 规则：结束 $ 前不能是空白；`$100`/纯数字金额不误判；跨行不算行内公式。
  */
-export function renderMarkdown(src) {
+function findInlineDollarEnd(text, start) {
+  let j = start + 1;
+  while (j < text.length && text[j] !== '\n') {
+    if (text[j] === '\\') {
+      j += 2;
+      continue;
+    }
+    if (text[j] === '$') {
+      const content = text.slice(start + 1, j);
+      if (content && !/^\s/.test(content) && !/\s$/.test(content)) {
+        if (/^\d/.test(content)) {
+          // 货币 / 纯数字：$100、$1,000、$100 and $200 里被当成候选的片段
+          if (/^\d[\d.,\s]*$/.test(content)) return -1;
+          if (!MATH_SIGNAL_RE.test(content) && /\d$/.test(content)) return -1;
+        }
+        return j;
+      }
+    }
+    j += 1;
+  }
+  return -1;
+}
+
+/** 把一行文本切成 text / code / math 三类 token（code 与数学互不解析）。 */
+function tokenizeInline(text) {
+  const tokens = [];
+  let buffer = '';
+  let i = 0;
+  const pushText = () => {
+    if (buffer) {
+      tokens.push({ type: 'text', value: buffer });
+      buffer = '';
+    }
+  };
+  while (i < text.length) {
+    const ch = text[i];
+    if (ch === '`') {
+      const close = text.indexOf('`', i + 1);
+      if (close > i) {
+        pushText();
+        tokens.push({ type: 'code', value: text.slice(i + 1, close) });
+        i = close + 1;
+        continue;
+      }
+    }
+    if (ch === '\\' && text[i + 1] === '$') {
+      buffer += '$';
+      i += 2;
+      continue;
+    }
+    if (ch === '$') {
+      if (text[i + 1] === '$') {
+        const close = text.indexOf('$$', i + 2);
+        if (close > i + 2) {
+          pushText();
+          tokens.push({ type: 'math', raw: text.slice(i, close + 2), tex: text.slice(i + 2, close), display: true });
+          i = close + 2;
+          continue;
+        }
+      } else {
+        const close = findInlineDollarEnd(text, i);
+        if (close > i) {
+          pushText();
+          tokens.push({ type: 'math', raw: text.slice(i, close + 1), tex: text.slice(i + 1, close), display: false });
+          i = close + 1;
+          continue;
+        }
+      }
+    }
+    if (ch === '\\' && text[i + 1] === '(') {
+      const close = text.indexOf('\\)', i + 2);
+      if (close > i + 2) {
+        pushText();
+        tokens.push({ type: 'math', raw: text.slice(i, close + 2), tex: text.slice(i + 2, close), display: false });
+        i = close + 2;
+        continue;
+      }
+    }
+    if (ch === '\\' && text[i + 1] === '[') {
+      const close = text.indexOf('\\]', i + 2);
+      if (close > i + 2) {
+        pushText();
+        tokens.push({ type: 'math', raw: text.slice(i, close + 2), tex: text.slice(i + 2, close), display: true });
+        i = close + 2;
+        continue;
+      }
+    }
+    buffer += ch;
+    i += 1;
+  }
+  pushText();
+  return tokens;
+}
+
+function renderInline(text, options) {
+  return tokenizeInline(text)
+    .map((token) => {
+      if (token.type === 'code') return `<code>${escapeHtml(token.value)}</code>`;
+      if (token.type === 'math') {
+        const html = renderMathHtml(token.tex, token.display, options);
+        return html || mathFallbackHtml(token.raw);
+      }
+      return renderInlineText(token.value);
+    })
+    .join('');
+}
+
+function renderBlockMathHtml(tex, raw, options) {
+  const html = renderMathHtml(tex, true, options);
+  if (html) return `<div class="math-block">${html}</div>`;
+  return `<div class="math-block math-fallback">${escapeHtml(raw)}</div>`;
+}
+
+/** 收集从第 i 行开始的块级公式；返回 {tex, raw, next} 或 null（未闭合）。 */
+function collectBlockMath(lines, i, startDelim, endDelim) {
+  const first = lines[i].trim();
+  const rest = first.slice(startDelim.length);
+  const sameLine = rest.indexOf(endDelim);
+  if (sameLine >= 0) {
+    const tex = rest.slice(0, sameLine);
+    return { tex, raw: first, next: i + 1 };
+  }
+  const parts = [rest];
+  for (let j = i + 1; j < lines.length; j++) {
+    const close = lines[j].indexOf(endDelim);
+    if (close >= 0) {
+      parts.push(lines[j].slice(0, close));
+      return { tex: parts.join('\n'), raw: lines.slice(i, j + 1).join('\n'), next: j + 1 };
+    }
+    parts.push(lines[j]);
+  }
+  return null;
+}
+
+/**
+ * Markdown 子集渲染器（含 KaTeX 公式）。
+ * - 块级公式：`$$…$$` / `\[…\]`（displayMode）
+ * - 行内公式：`$…$` / `\(…\)`，代码块/行内 code 内不解析
+ * - 单条公式解析失败回退原文；KaTeX 未加载时全部回退原文
+ * - options.katex 可注入实现（Node 单测用）
+ */
+export function renderMarkdown(src, options = {}) {
   const source = stripMachineComment(src);
   if (!source) return '';
   const lines = source.replace(/\r\n?/g, '\n').split('\n');
@@ -56,7 +233,7 @@ export function renderMarkdown(src) {
 
   const flushPara = () => {
     if (para.length) {
-      out.push(`<p>${renderInline(para.join('\n'))}</p>`);
+      out.push(`<p>${renderInline(para.join('\n'), options)}</p>`);
       para = [];
     }
   };
@@ -67,19 +244,57 @@ export function renderMarkdown(src) {
     }
   };
 
-  for (const rawLine of lines) {
+  let i = 0;
+  while (i < lines.length) {
+    const rawLine = lines[i];
     const line = rawLine.replace(/\s+$/, '');
+    const trimmed = line.trim();
+
+    // 1) 代码块（内部不解析 Markdown/公式）
+    const fence = /^(```|~~~)/.exec(trimmed);
+    if (fence) {
+      flushPara();
+      closeList();
+      const marker = fence[1];
+      const body = [];
+      i += 1;
+      while (i < lines.length && !lines[i].trim().startsWith(marker)) {
+        body.push(lines[i]);
+        i += 1;
+      }
+      if (i < lines.length) i += 1; // 跳过结束围栏
+      out.push(`<pre class="md-code"><code>${escapeHtml(body.join('\n'))}</code></pre>`);
+      continue;
+    }
+
+    // 2) 块级公式
+    let block = null;
+    if (trimmed.startsWith('$$')) block = { spec: ['$$', '$$'], math: collectBlockMath(lines, i, '$$', '$$') };
+    else if (trimmed.startsWith('\\[')) block = { spec: ['\\[', '\\]'], math: collectBlockMath(lines, i, '\\[', '\\]') };
+    if (block) {
+      flushPara();
+      closeList();
+      if (block.math) {
+        out.push(renderBlockMathHtml(block.math.tex, block.math.raw, options));
+        i = block.math.next;
+        continue;
+      }
+      // 没闭合：当普通段落处理（下面会走 renderInline 的 fallback）
+    }
+
     if (!line.trim()) {
       flushPara();
       closeList();
+      i += 1;
       continue;
     }
     const heading = /^(#{1,6})\s+(.*)$/.exec(line);
     if (heading) {
       flushPara();
       closeList();
-      const level = Math.min(4, Math.max(3, heading[1].length + 1)); // #/## → h3，### → h4
-      out.push(`<h${level}>${renderInline(heading[2])}</h${level}>`);
+      const level = Math.min(4, Math.max(3, heading[1].length + 1));
+      out.push(`<h${level}>${renderInline(heading[2], options)}</h${level}>`);
+      i += 1;
       continue;
     }
     const ul = /^\s*[-*+]\s+(.*)$/.exec(line);
@@ -92,11 +307,13 @@ export function renderMarkdown(src) {
         out.push(`<${kind}>`);
         listKind = kind;
       }
-      out.push(`<li>${renderInline((ul || ol)[1])}</li>`);
+      out.push(`<li>${renderInline((ul || ol)[1], options)}</li>`);
+      i += 1;
       continue;
     }
     closeList();
     para.push(line);
+    i += 1;
   }
   flushPara();
   closeList();
@@ -528,7 +745,7 @@ export async function explainRegion({ page, rect, force = false } = {}) {
     kind: 'region',
     sel: { page: Number(page), paraId: '', text: '' },
     ctx: {},
-    region: { page: Number(page), rect: normalized, regionText: '' },
+    region: { page: Number(page), rect: normalized, regionText: '', regionLines: [] },
     force,
     send: (signal) => deps.api.explainRegionStream({ docId, page: Number(page), rect: normalized, force: !!force }, signal),
   });
@@ -553,7 +770,12 @@ export function openEntry(entry) {
   const translateText = kind === 'translate' ? ctx.paraText || entry.selText || '' : '';
   const region =
     kind === 'region'
-      ? { page: Number(entry.page) || 1, rect: Array.isArray(entry.rect) ? entry.rect.map(Number) : null, regionText: entry.regionText || '' }
+      ? {
+          page: Number(entry.page) || 1,
+          rect: Array.isArray(entry.rect) ? entry.rect.map(Number) : null,
+          regionText: entry.regionText || '',
+          regionLines: Array.isArray(entry.regionLines) ? entry.regionLines : [],
+        }
       : null;
   current = {
     kind,
@@ -779,11 +1001,14 @@ function handleEvent(ev) {
       current.status = 'done';
       if (!current.answer && current.entry?.answer) current.answer = current.entry.answer;
       if (current.kind === 'region') {
+        // 宿主会返回吸附后的 rect（扩展到完整文本行），画框/缩略图/历史回看都用它
         const rect = Array.isArray(current.entry?.rect) ? current.entry.rect : current.region?.rect;
+        const lines = Array.isArray(current.entry?.regionLines) ? current.entry.regionLines : current.region?.regionLines;
         current.region = {
           page: current.entry?.page || current.region?.page || current.sel.page,
           rect: rect ? rect.map(Number) : null,
           regionText: current.entry?.regionText || current.region?.regionText || '',
+          regionLines: Array.isArray(lines) ? lines : [],
         };
       }
       if (current.kind === 'translate' && !current.translateText) {
@@ -915,13 +1140,27 @@ function renderHeadCard() {
     metaRow.appendChild(h('span', '', `第 ${region.page || page || '?'} 页${sizeText ? ` · ${sizeText}` : ''}`));
     if (section) metaRow.appendChild(h('span', '', section));
     card.appendChild(metaRow);
-    if (region.regionText) {
+    const sourceLines = Array.isArray(region.regionLines)
+      ? region.regionLines.filter((line) => line && typeof line.text === 'string')
+      : [];
+    if (sourceLines.length || region.regionText) {
       const detail = document.createElement('details');
       detail.className = 'thread-source';
       const summary = document.createElement('summary');
-      summary.textContent = '区域文字层';
+      summary.textContent = sourceLines.length ? `区域文字层 · ${sourceLines.length} 行` : '区域文字层';
       const body = document.createElement('div');
-      body.textContent = region.regionText;
+      if (sourceLines.length) {
+        body.className = 'region-lines';
+        for (const line of sourceLines) {
+          const row = document.createElement('div');
+          row.className = line.kind === 'math' ? 'region-line region-line-math' : 'region-line';
+          if (line.kind === 'math') row.appendChild(h('span', 'region-line-kind', '公式'));
+          row.appendChild(h('span', 'region-line-text', line.text));
+          body.appendChild(row);
+        }
+      } else {
+        body.textContent = region.regionText;
+      }
       detail.append(summary, body);
       card.appendChild(detail);
     } else {
@@ -1086,7 +1325,12 @@ function retry(force = false) {
     return;
   }
   if (base.kind === 'region') {
-    explainRegion({ page: current.region?.page || current.sel.page, rect: current.region?.rect || [], force: nextForce });
+    const originalRect = base.region && Array.isArray(base.region.rect) ? base.region.rect : null;
+    explainRegion({
+      page: current.region?.page || current.sel.page,
+      rect: originalRect || current.region?.rect || [],
+      force: nextForce,
+    });
     return;
   }
   if (base.entryId && current.fromHistory) {

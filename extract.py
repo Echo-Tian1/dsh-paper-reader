@@ -698,8 +698,177 @@ def links_only_cli(argv):
                 pass
 
 
+MATH_FONT_TOKENS = (
+    "CMR", "CMMI", "CMSY", "CMEX", "CMMIB", "CMBSY", "MSAM", "MSBM",
+    "STIX", "Symbol", "Euclid", "LatinModernMath", "XITS", "Math",
+)
+MATH_CHARS = set("=+−-±∓×÷·⋅√∑∏∫∬∂∇∞≤≥≠≈≡≅∈∉⊂⊃⊆⊇∪∩∧∨¬→←↔⇒⇔∀∃^_{}()[]|/\\<>")
+
+
+def _is_math_char(char):
+    """数学/符号字符（含希腊字母、数学运算符、上下标数字）。"""
+    if char in MATH_CHARS:
+        return True
+    code = ord(char)
+    return (
+        0x0370 <= code <= 0x03FF        # 希腊字母
+        or 0x2200 <= code <= 0x22FF     # 数学运算符
+        or 0x27C0 <= code <= 0x27EF     # 杂项数学符号
+        or 0x2070 <= code <= 0x209F     # 上/下标数字
+        or 0x1D400 <= code <= 0x1D7FF   # 数学字母数字
+    )
+
+
+def _weighted_median(values):
+    """按字符数加权的“行内主导字号/基线”（避免一行只有 2 个 span 时中位数失效）。"""
+    if not values:
+        return 0.0
+    values = sorted(values)
+    return values[len(values) // 2]
+
+
+def _line_reference(spans):
+    """行的主导字号与主导基线（按 span 文本长度加权）。"""
+    sizes = []
+    baselines = []
+    for span in spans:
+        text = span.get("text") or ""
+        weight = max(1, len(text))
+        size = float(span.get("size") or 0)
+        if size > 0:
+            sizes.extend([size] * weight)
+        origin = span.get("origin")
+        baseline = float(origin[1]) if origin is not None else float((span.get("bbox") or (0, 0, 0, 0))[3])
+        baselines.extend([baseline] * weight)
+    return _weighted_median(sizes), _weighted_median(baselines)
+
+
+def _render_line(spans):
+    """把一行 span 从左到右拼成文本；上标 ^{…}、下标 _{…}（排版还原标记）。"""
+    ref_size, ref_baseline = _line_reference(spans)
+    chunks = []
+    for span in sorted(spans, key=lambda item: ((item.get("bbox") or (0, 0, 0, 0))[0], (item.get("bbox") or (0, 0, 0, 0))[1])):
+        text = span.get("text") or ""
+        if not text.strip():
+            continue
+        bbox = span.get("bbox") or (0, 0, 0, 0)
+        size = float(span.get("size") or 0)
+        origin = span.get("origin")
+        baseline = float(origin[1]) if origin is not None else float(bbox[3])
+        flags = int(span.get("flags") or 0)
+        superscript = False
+        subscript = False
+        if ref_size > 0 and size > 0 and size < ref_size * 0.85:
+            if baseline < ref_baseline - 0.5:
+                superscript = True
+            elif baseline > ref_baseline + 0.5:
+                subscript = True
+        # 契约：flags & 1 是上标；但部分分子/分式 span 也误带该位，所以还要求字号明显偏小
+        if not superscript and (flags & 1) and ref_size > 0 and size < ref_size * 0.9 and baseline < ref_baseline - 0.5:
+            superscript = True
+        text = text.strip()
+        if superscript:
+            text = "^{%s}" % text
+        elif subscript:
+            text = "_{%s}" % text
+        chunks.append((text, float(bbox[0]), float(bbox[2]), size))
+    out = ""
+    previous_x1 = None
+    previous_size = 10.0
+    for text, x0, x1, size in chunks:
+        if not text:
+            continue
+        if out and previous_x1 is not None:
+            gap = x0 - previous_x1
+            if gap > 0.12 * max(previous_size, size, 1.0) and not out.endswith(" ") and not text.startswith(" "):
+                out += " "
+        out += text
+        previous_x1 = x1
+        previous_size = size
+    return out.strip()
+
+
+def _line_kind(text, spans, line_bbox, page_width):
+    """math：数学字体 / 数学符号占比 >30% / 明显居中排版；否则 text。"""
+    fonts = " ".join(str(span.get("font") or "") for span in spans)
+    if any(token in fonts for token in MATH_FONT_TOKENS):
+        return "math"
+    visible = [char for char in text if not char.isspace()]
+    if visible:
+        math_count = sum(1 for char in visible if _is_math_char(char))
+        if math_count / float(len(visible)) > 0.3:
+            return "math"
+    x0, y0, x1, y1 = line_bbox
+    width = x1 - x0
+    if width > 0 and width < 0.65 * page_width and x0 > 0.12 * page_width and (page_width - x1) > 0.12 * page_width:
+        return "math"
+    return "text"
+
+
+def _region_column_split(page):
+    """页面级双栏判定（复用 detect_columns）；单栏返回 None。"""
+    width = float(page.rect.width)
+    raw = page.get_text("dict")
+    raw_blocks = [block for block in (raw.get("blocks") or []) if block.get("type") == 0]
+    sizes = [
+        float(span.get("size") or 0)
+        for block in raw_blocks
+        for line in (block.get("lines") or [])
+        for span in (line.get("spans") or [])
+    ]
+    body_size = median(sizes, 10.0)
+    blocks = [read_block(block, body_size) for block in raw_blocks]
+    blocks = [block for block in blocks if block is not None and not block.rotated]
+    if not blocks:
+        return None
+    columns, split = detect_columns(blocks, width)
+    return split if columns == "two" else None
+
+
+def _select_region_lines(page, drag_rect):
+    """选出与拖动矩形相交的文本行（垂直重叠 >40%，或细长选区按水平重叠兜底）。"""
+    split = _region_column_split(page)
+    page_width = float(page.rect.width)
+    drag_height = max(0.01, drag_rect.height)
+    selected = []
+    for block in page.get_text("dict").get("blocks") or []:
+        if block.get("type") != 0:
+            continue
+        for line in block.get("lines") or []:
+            bbox = line.get("bbox")
+            if not bbox:
+                continue
+            direction = line.get("dir") or (1, 0)
+            if abs(direction[1]) > 1e-3:
+                continue  # 旋转文字（图内文字）不参与公式重建
+            line_rect = fitz.Rect(bbox)
+            line_height = max(0.01, line_rect.height)
+            line_width = max(0.01, line_rect.width)
+            vertical_overlap = max(0.0, min(line_rect.y1, drag_rect.y1) - max(line_rect.y0, drag_rect.y0))
+            horizontal_overlap = max(0.0, min(line_rect.x1, drag_rect.x1) - max(line_rect.x0, drag_rect.x0))
+            primary = vertical_overlap > 0.4 * line_height and horizontal_overlap > 0
+            thin = (
+                horizontal_overlap > 0.3 * line_width
+                and vertical_overlap > 0.2 * line_height
+                and vertical_overlap >= 0.3 * drag_height
+            )
+            if not (primary or thin):
+                continue
+            spans = [span for span in (line.get("spans") or []) if (span.get("text") or "").strip()]
+            if not spans:
+                continue
+            selected.append({"bbox": line_rect, "spans": spans})
+    def sort_key(item):
+        rect = item["bbox"]
+        center_x = (rect.x0 + rect.x1) / 2.0
+        column = 0 if split is None else (0 if center_x < split else 1)
+        return (column, round(rect.y0, 1), rect.x0)
+    selected.sort(key=sort_key)
+    return selected
+
+
 def region_cli(argv):
-    """--region 子命令：一次性抽取某页矩形区域的文字层（无守护进程，单次 <1s）。"""
+    """--region：框选区域 → 吸附矩形 + 行级重建（上下标标记），一次性 stdout JSON。"""
     if len(argv) != 5:
         fail("py-error", "用法：python3 extract.py --region <source.pdf> <page> <x0,y0,x1,y1>", 2)
     source_path = argv[2]
@@ -729,16 +898,45 @@ def region_cli(argv):
         if page_number < 1 or page_number > total:
             fail("bad-region", "页码超出范围：第 %d 页（共 %d 页）" % (page_number, total), 2)
         page = doc[page_number - 1]
-        clip = fitz.Rect(x0, y0, x1, y1) & page.rect
-        if clip.is_empty or clip.width <= 0 or clip.height <= 0:
+        page_rect = page.rect
+        drag_rect = fitz.Rect(x0, y0, x1, y1)
+        clipped_drag = drag_rect & page_rect
+        if clipped_drag.is_empty or clipped_drag.width <= 0 or clipped_drag.height <= 0:
             fail("bad-region", "框选区域与页面没有交集", 2)
-        text = page.get_text("text", clip=clip)
+
+        selected = _select_region_lines(page, clipped_drag)
+        warnings = []
+        if selected:
+            union = fitz.Rect(selected[0]["bbox"])
+            for item in selected[1:]:
+                union |= item["bbox"]
+            snapped = union & page_rect
+        else:
+            snapped = clipped_drag
+            warnings.append("框选区域没有文字层，只能依据上下文与版面位置推测")
+        if snapped.is_empty or snapped.width <= 0 or snapped.height <= 0:
+            snapped = clipped_drag
+
+        page_width = float(page_rect.width)
+        lines_out = []
+        for item in selected:
+            text = _render_line(item["spans"])
+            if not text:
+                continue
+            lines_out.append({
+                "text": text,
+                "kind": _line_kind(text, item["spans"], item["bbox"], page_width),
+                "bbox": [round(item["bbox"].x0, 2), round(item["bbox"].y0, 2),
+                         round(item["bbox"].x1, 2), round(item["bbox"].y1, 2)],
+            })
+        region_text = "\n".join(line["text"] for line in lines_out)
         print(json.dumps({
             "ok": True,
             "page": page_number,
-            "rect": [round(clip.x0, 2), round(clip.y0, 2), round(clip.x1, 2), round(clip.y1, 2)],
-            "hasText": bool(text.strip()),
-            "text": text,
+            "rect": [round(snapped.x0, 2), round(snapped.y0, 2), round(snapped.x1, 2), round(snapped.y1, 2)],
+            "lines": lines_out,
+            "text": region_text,
+            "warnings": warnings,
         }, ensure_ascii=False))
         sys.stdout.flush()
         return 0

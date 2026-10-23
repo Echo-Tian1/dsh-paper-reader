@@ -31,14 +31,10 @@ import {
 } from '../store.js'
 
 const HERE = path.dirname(fileURLToPath(import.meta.url))
-
-// 夹具 PDF（arXiv:1706.03762v7）不随仓库分发：放到 tests/fixtures/ 或用 PR_FIXTURE 指定；
-// 没有夹具时，依赖真实论文的用例自动 skip，其余用例照常跑。
+const EXTRACT = path.join(HERE, '..', 'extract.py')
 const FIXTURE = process.env.PR_FIXTURE || path.join(HERE, 'fixtures', '1706.03762v7.pdf')
 const HAS_FIXTURE = existsSync(FIXTURE)
 const SKIP_NO_FIXTURE = HAS_FIXTURE ? {} : { skip: '缺少夹具 PDF：把 1706.03762v7.pdf 放到 tests/fixtures/ 或设置 PR_FIXTURE' }
-const EXTRACT = path.join(HERE, '..', 'extract.py')
-
 const DOC_ID = 'a1b2c3d4e5f60718'
 
 const BODY = '### 1. 中译\n这是译文正文。'
@@ -228,27 +224,66 @@ describe('extract.py --region 子命令', SKIP_NO_FIXTURE, () => {
     assert.ok(FIXTURE, '需要夹具 PDF 才能验证 region 抽取')
   })
 
-  it('第 4 页公式区域：返回一行 JSON、文字层含 softmax、单次 <1s 量级', () => {
-    const run = runRegion([FIXTURE, '4', '210,455,510,500'])
+  it('第 4 页公式区域：吸附矩形 + 行级重建 + 上下标标记', () => {
+    const run = runRegion([FIXTURE, '4', '205,450,515,505'])
     assert.equal(run.status, 0, String(run.stderr))
     const lines = String(run.stdout).trim().split('\n')
     assert.equal(lines.length, 1, 'stdout 必须只有一行 JSON')
     const result = JSON.parse(lines[0])
     assert.equal(result.ok, true)
     assert.equal(result.page, 4)
-    assert.equal(result.hasText, true)
+    assert.equal(result.rect.length, 4)
+    assert.ok(result.rect.every(value => Number.isFinite(value)))
+    // 吸附：不再是原始拖动框，而是扩展成完整文本行的并集
+    assert.notDeepEqual(result.rect, [205, 450, 515, 505])
+    assert.ok(result.rect[1] <= 470, `吸附后上边界 ${result.rect[1]} 应覆盖公式行`)
+    assert.ok(result.rect[2] >= 504, `吸附后右边界 ${result.rect[2]} 应覆盖公式行`)
+    assert.ok(result.rect[3] >= 483, `吸附后下边界 ${result.rect[3]} 应覆盖公式行`)
+
+    assert.ok(Array.isArray(result.lines) && result.lines.length >= 3)
+    for (const line of result.lines) {
+      assert.equal(line.kind === 'math' || line.kind === 'text', true)
+      assert.equal(line.bbox.length, 4)
+      assert.ok(line.bbox[0] >= -1 && line.bbox[1] >= -1)
+      assert.ok(line.bbox[2] <= 613 && line.bbox[3] <= 793)
+    }
+    const mathLines = result.lines.filter(line => line.kind === 'math')
+    assert.ok(mathLines.length >= 3, `math 行只有 ${mathLines.length} 条`)
+    const softmaxLine = result.lines.find(line => /softmax/i.test(line.text))
+    assert.ok(softmaxLine, '应包含 softmax 行')
+    assert.equal(softmaxLine.kind, 'math')
+    // 阅读顺序（单栏：y 自上而下，允许同 y 的极小误差）
+    const tops = result.lines.map(line => line.bbox[1])
+    for (let index = 1; index < tops.length; index += 1) {
+      assert.ok(tops[index] >= tops[index - 1] - 0.5, `lines 未按阅读顺序：${tops.join(',')}`)
+    }
+    // 上下标：QK^{T} / √d_{k} 是排版还原标记
+    assert.match(result.text, /QK\^\{T\}/)
+    assert.match(result.text, /d_\{k\}/)
     assert.match(result.text, /softmax/i)
-    assert.deepEqual(result.rect.length, 4)
+    assert.ok(Array.isArray(result.warnings))
     assert.ok(run.durationMs < 5000, `区域抽取耗时 ${run.durationMs}ms 偏大`)
   })
 
-  it('空白区域：ok:true、hasText:false、text 为空', () => {
+  it('切边吸附：只覆盖左半边的 rect 会扩展到整行', () => {
+    const run = runRegion([FIXTURE, '4', '205,465,300,483'])
+    assert.equal(run.status, 0, String(run.stderr))
+    const result = JSON.parse(String(run.stdout).trim())
+    assert.ok(result.rect[2] > 300, `吸附后右边界 ${result.rect[2]} 应超出拖动框`)
+    assert.ok(result.rect[2] >= 370, `吸附后应覆盖整行（右边界 ${result.rect[2]}）`)
+    assert.ok(result.text.includes('softmax'))
+    assert.equal(result.lines[0].kind, 'math')
+  })
+
+  it('空白区域：lines 为空、text 为空、带 warning，rect 保持拖动框', () => {
     const run = runRegion([FIXTURE, '1', '2,2,30,30'])
     assert.equal(run.status, 0, String(run.stderr))
     const result = JSON.parse(String(run.stdout).trim())
     assert.equal(result.ok, true)
-    assert.equal(result.hasText, false)
+    assert.deepEqual(result.lines, [])
     assert.equal(result.text.trim(), '')
+    assert.ok(Array.isArray(result.warnings) && result.warnings.length > 0)
+    assert.deepEqual(result.rect, [2, 2, 30, 30])
   })
 
   it('非法页码 / 非法 rect：code=bad-region 且非零退出', () => {

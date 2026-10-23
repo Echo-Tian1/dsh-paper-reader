@@ -38,6 +38,7 @@ import {
   summaryCacheLabel,
   summaryToggleLabel,
   summaryToggleTitle,
+  renderMathHtml,
 } from '../explain.js';
 import {
   locateRange,
@@ -910,6 +911,112 @@ check('fixture P1：历史 index 含 summary 条目（kind=summary）', () => {
   assert.ok(mockJs.includes("kind: 'summary'"));
   assert.ok(mockJs.includes('await ensureSummaryLoaded()'));
   assert.ok(!index.some((item) => item.kind === 'summary'), 'fixture 静态 index 不应硬编码 summary（由 mock 动态合并）');
+});
+
+// ---------- P2：KaTeX / 区域吸附 / 按钮命中区 ----------
+
+const fakeKatex = {
+  renderToString(tex, options = {}) {
+    if (String(tex).includes('BAD')) throw new Error('fake katex failure');
+    return `<span class="katex" data-tex="${String(tex).replace(/"/g, '&quot;')}" data-display="${options.displayMode ? '1' : '0'}"></span>`;
+  },
+};
+
+check('KaTeX：行内 $…$ / \\(…\\) 渲染，displayMode=false', () => {
+  const inline = renderMarkdown('前面 $x+1$ 后面', { katex: fakeKatex });
+  assert.ok(inline.includes('class="katex"'), inline);
+  assert.ok(inline.includes('data-tex="x+1"'));
+  assert.ok(inline.includes('data-display="0"'));
+  assert.ok(!inline.includes('$x+1$'));
+  const paren = renderMarkdown('公式 \\(a^2+b^2\\) 结束', { katex: fakeKatex });
+  assert.ok(paren.includes('data-tex="a^2+b^2"'));
+  assert.ok(paren.includes('data-display="0"'));
+});
+
+check('KaTeX：块级 $$…$$ / \\[…\\] displayMode=true + .math-block', () => {
+  const fenced = renderMarkdown('前文\n\n$$\n\\frac{a}{b}\n$$\n\n后文', { katex: fakeKatex });
+  assert.ok(fenced.includes('class="math-block"'), fenced);
+  assert.ok(fenced.includes('data-display="1"'));
+  assert.ok(fenced.includes('data-tex="\\frac{a}{b}"'));
+  const bracket = renderMarkdown('\\[\nE=mc^2\n\\]', { katex: fakeKatex });
+  assert.ok(bracket.includes('class="math-block"'));
+  assert.ok(bracket.includes('data-tex="E=mc^2"'));
+});
+
+check('KaTeX：代码块/行内 code 内不解析公式', () => {
+  const inlineCode = renderMarkdown('代码 `$x+1$` 不应渲染', { katex: fakeKatex });
+  assert.ok(inlineCode.includes('<code>$x+1$</code>'), inlineCode);
+  assert.ok(!inlineCode.includes('class="katex"'));
+  const fenced = renderMarkdown('```js\nconst a = "$x+1$";\n```', { katex: fakeKatex });
+  assert.ok(fenced.includes('class="md-code"'), fenced);
+  assert.ok(fenced.includes('$x+1$'));
+  assert.ok(!fenced.includes('class="katex"'));
+});
+
+check('KaTeX：$100 货币不误判，\\$ 转义', () => {
+  const currency = renderMarkdown('价格 $100，另一个 $200。', { katex: fakeKatex });
+  assert.ok(currency.includes('$100'), currency);
+  assert.ok(!currency.includes('class="katex"'), currency);
+  const escaped = renderMarkdown('成本 \\$100 美元', { katex: fakeKatex });
+  assert.ok(escaped.includes('$100'), escaped);
+  assert.ok(!escaped.includes('class="katex"'));
+});
+
+check('KaTeX：单条坏公式回退原文，不影响其它公式', () => {
+  const out = renderMarkdown('好公式 $x^2$，坏公式 $BAD$', { katex: fakeKatex });
+  assert.ok(out.includes('data-tex="x^2"'), out);
+  assert.ok(out.includes('math-fallback'), out);
+  assert.ok(out.includes('$BAD$'), out);
+  // 没有 KaTeX 时全部回退原文，不抛异常
+  const noKatex = renderMarkdown('$x^2$', {});
+  assert.ok(noKatex.includes('$x^2$'));
+  assert.equal(renderMathHtml('x', false, {}), null);
+});
+
+check('KaTeX 资源存在且 index.html 正确引入', () => {
+  const vendor = path.join(APP, 'vendor/katex');
+  for (const file of ['katex.min.js', 'katex.min.css', 'LICENSE']) {
+    assert.ok(existsSync(path.join(vendor, file)), `缺少 vendor/katex/${file}`);
+  }
+  assert.ok(existsSync(path.join(vendor, 'fonts/KaTeX_Main-Regular.woff2')), '缺少 KaTeX 字体');
+  assert.ok(html.includes('vendor/katex/katex.min.css'));
+  assert.ok(/<script[^>]+defer[^>]+vendor\/katex\/katex\.min\.js/.test(html));
+});
+
+check('按钮命中区：关键选择器有最小尺寸 + touch-action', () => {
+  const need = [
+    [/\.icon-btn\s*\{[^}]*min-width:\s*34px[^}]*min-height:\s*34px/s, '.icon-btn ≥34×34'],
+    [/\.btn\s*\{[^}]*min-height:\s*32px/s, '.btn min-height 32'],
+    [/\.tab\s*\{[^}]*min-height:\s*34px/s, '.tab min-height 34'],
+    [/\.tb-btn\s*\{[^}]*min-height:\s*32px/s, '.tb-btn min-height 32'],
+    [/\.zoom-btn\s*\{[^}]*min-width:\s*32px/s, '.zoom-btn min-width 32'],
+    [/\.tabs\s*\{[^}]*scroll-padding/s, '.tabs scroll-padding'],
+    [/touch-action:\s*manipulation/, 'touch-action'],
+  ];
+  for (const [re, label] of need) assert.ok(re.test(css), `styles.css 缺少 ${label}`);
+});
+
+check('区域吸附 rect / regionLines 逐行展示', () => {
+  assert.ok(explainJs.includes('regionLines'), 'explain.js 未消费 regionLines');
+  assert.ok(explainJs.includes('当前'), 'sanity');
+  assert.ok(explainJs.includes('region-line-math'), 'explain.js 未渲染 math 行标记');
+  assert.ok(mockJs.includes('snapRegionRect'), 'mock 未模拟吸附 rect');
+  const ex = readJson('fixture/explanations.json');
+  const region = ex.entries.find((e) => e.kind === 'region');
+  assert.ok(Array.isArray(region.regionLines) && region.regionLines.length >= 1);
+  assert.ok(region.regionLines.some((line) => line.kind === 'math'), '区域 fixture 缺少 math 行');
+  assert.ok(region.answer.includes('$$'), '区域答案缺少块级公式');
+});
+
+check('P2 fixture：解释/翻译/摘要答案含 LaTeX', () => {
+  const ex = readJson('fixture/explanations.json');
+  const explain = ex.entries.find((e) => e.id === 'e_fixture01');
+  const translate = ex.entries.find((e) => e.kind === 'translate');
+  const summary = readJson('fixture/summary.json').entry;
+  for (const [label, text] of [['解释', explain.answer], ['翻译', translate.answer], ['摘要', summary.answer]]) {
+    assert.ok(/\$[^$]+\$/.test(text), `${label}答案缺少行内 LaTeX`);
+  }
+  assert.ok(ex.entries.some((e) => e.answer.includes('$$')), '缺少块级 LaTeX');
 });
 
 // ---------- 汇总 ----------
