@@ -234,6 +234,21 @@ export function buildContext(structure, sel) {
   }
 }
 
+/**
+ * 推理力度选项（三个链路共用）。
+ *
+ * 解释/翻译/区域说明都是「结构化输出」，不需要思考预算；而 DeepSeek 的思考 token
+ * 与正文共享 maxTokens —— 实机上开着 thinking 时，1600 的正文额度会被思考吃穿，
+ * 直接 finish:max-tokens。所以默认按调用关掉思考（`reasoningEffort: 'off'`），
+ * 需要时可在 profile 配置里改回 'high' / 'max'。
+ * @param {object} config 宿主配置
+ * @returns {object} 可直接展开进 GenerateOptions 的片段
+ */
+export function reasoningOptions(config) {
+  const effort = config && 'reasoningEffort' in config ? config.reasoningEffort : 'off'
+  return effort ? { reasoningEffort: effort } : {}
+}
+
 /** 组 ctx.llm.stream 的参数（CONTRACT §6）。 */
 export function buildLlmRequest(config, context) {
   return {
@@ -245,6 +260,7 @@ export function buildLlmRequest(config, context) {
     ],
     temperature: config.temperature,
     maxTokens: config.maxTokens,
+    ...reasoningOptions(config),
   }
 }
 
@@ -665,6 +681,7 @@ export async function serveTranslate({ ctx, config, env = process.env, req, res 
     messages: [{ role: 'user', content: [{ type: 'text', text: userText }] }],
     temperature: config.temperature,
     maxTokens: config.maxTokens,
+    ...reasoningOptions(config),
   }
   const result = await consumeCompletion({ ctx, config, req, res, request })
   if (result.clientGone) {
@@ -842,6 +859,7 @@ export async function serveRegion({ ctx, config, env = process.env, req, res }) 
     messages: [{ role: 'user', content: [{ type: 'text', text: userText }] }],
     temperature: config.temperature,
     maxTokens: config.maxTokens,
+    ...reasoningOptions(config),
   }
   const result = await consumeCompletion({ ctx, config, req, res, request })
   if (result.clientGone) {

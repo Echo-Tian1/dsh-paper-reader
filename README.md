@@ -101,7 +101,8 @@ REAL_LLM=1 PORT=18080 node tests/serve.mjs
     provider: deepseek-official
     model: deepseek-v4-flash     # 难句可改 deepseek-v4-pro
     temperature: 0.3
-    maxTokens: 1600
+    maxTokens: 4096              # 解释/翻译/区域解释的输出上限
+    reasoningEffort: 'off'       # 按调用关思考（原因见下）
     pythonPath: python3          # 需能 import fitz（PyMuPDF）
     maxUploadMB: 80
     extractTimeoutMs: 120000
@@ -149,6 +150,16 @@ REAL_LLM=1 PORT=18080 node tests/serve.mjs
 v2 追加验证：术语 trailer 在流式里零泄露（含跨 chunk 切分）、术语合并计数、译文目标语言判定、框选坐标反算（滚动/缩放/越界）、region 文字层抽取与缩略图、术语点击跳页、历史三种徽标；真模型下译文 1.3s、公式区域 2.5s、术语自动累积 4 条、同链路缓存重复 0 调用。
 
 **未目视验证**：真实 DSH 窗口内的最终观感（需要重启装载插件）、真人鼠标拖选轨迹、触屏、深色主题下的配色细节。这几项请安装后看一眼，不对我改。
+
+## 关于 maxTokens 与「思考」
+
+DeepSeek 的思考（thinking）token 与正文**共享** `maxTokens`。解释/翻译/区域解释都是结构化输出，不需要思考预算，开着 thinking 时正文会被挤到上限（`finish:max-tokens` → 按设计不写缓存）。
+所以三个链路默认按调用传 `reasoningEffort: 'off'`，并把默认上限提到 4096。要更深的分析可以改回：
+
+```yaml
+    reasoningEffort: 'high'
+    maxTokens: 8000
+```
 
 ## 能力边界（务必知道）
 
