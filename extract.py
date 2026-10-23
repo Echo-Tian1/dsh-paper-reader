@@ -4,7 +4,7 @@
 
 用法：
     python3 extract.py <source.pdf> <outDir>                  # 全量抽取
-    python3 extract.py --region <pdf> <page> <x0,y0,x1,y1>    # 框选区域文字层（一次性，stdout 一行 JSON）
+    python3 extract.py --region <pdf> <page> <x0,y0,x1,y1>    # 框选区域（吸附 + 行级重建；扫描页自动视觉 OCR）
     python3 extract.py --links-only <pdf> <outDir>            # 只回填 links.json（老文档惰性重建用）
 
 产物：
@@ -25,7 +25,10 @@ import json
 import os
 import re
 import statistics
+import subprocess
 import sys
+import tempfile
+import time
 import traceback
 
 try:
@@ -867,6 +870,164 @@ def _select_region_lines(page, drag_rect):
     return selected
 
 
+# OCR 区域渲染的目标宽度（px）与向外扩边（pt）：契约建议宽 1500-2000px、外扩 8-10pt
+OCR_TARGET_WIDTH_PX = 1800.0
+OCR_PAD_PT = 9.0
+
+
+def _plugin_data_dir():
+    """OCR 二进制缓存目录的父目录（宿主会通过 PR_PLUGIN_DATA 传入）。"""
+    explicit = os.environ.get("PR_PLUGIN_DATA")
+    if explicit:
+        return explicit
+    home = os.environ.get("DSH_HOME") or os.path.expanduser("~/.dsh")
+    return os.path.join(home, "plugin-data", "paper-reader")
+
+
+def _ocr_source_path():
+    return os.path.join(os.path.dirname(os.path.abspath(__file__)), "ocr.swift")
+
+
+def _ensure_ocr_binary():
+    """懒编译 ocr.swift 并缓存到 <plugin-data>/bin/ocr-<sha12>；失败返回 (None, 原因)。"""
+    override = os.environ.get("PR_OCR_BIN")
+    if override:
+        if os.path.isfile(override) and os.access(override, os.X_OK):
+            return override, None
+        return None, "PR_OCR_BIN 指定的 OCR 二进制不可用：%s" % override
+
+    source = _ocr_source_path()
+    if not os.path.isfile(source):
+        return None, "缺少 OCR 源码 ocr.swift：%s" % source
+    try:
+        with open(source, "rb") as handle:
+            digest = hashlib.sha256(handle.read()).hexdigest()[:12]
+    except OSError as exc:
+        return None, "OCR 源码不可读：%s" % exc
+
+    bin_dir = os.path.join(_plugin_data_dir(), "bin")
+    bin_path = os.path.join(bin_dir, "ocr-%s" % digest)
+    if os.path.isfile(bin_path) and os.access(bin_path, os.X_OK):
+        return bin_path, None
+
+    swiftc = os.environ.get("PR_SWIFTC") or "swiftc"
+    try:
+        timeout_ms = int(os.environ.get("PR_OCR_TIMEOUT_MS") or 20000)
+    except (TypeError, ValueError):
+        timeout_ms = 20000
+    compile_timeout = min(60.0, max(5.0, timeout_ms / 1000.0))
+    temp_path = bin_path + ".tmp-%d" % os.getpid()
+    try:
+        os.makedirs(bin_dir, exist_ok=True)
+        proc = subprocess.run(
+            [swiftc, "-O", source, "-o", temp_path],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            timeout=compile_timeout,
+        )
+        if proc.returncode != 0:
+            detail = (proc.stderr or b"").decode("utf-8", "replace").strip().splitlines()[-3:]
+            return None, "swiftc 编译失败：%s" % (" / ".join(detail) or ("退出码 %d" % proc.returncode))
+        os.chmod(temp_path, 0o755)
+        os.replace(temp_path, bin_path)
+        return bin_path, None
+    except FileNotFoundError:
+        return None, "找不到 swiftc（%s）；macOS 需安装 Command Line Tools（xcode-select --install）" % swiftc
+    except subprocess.TimeoutExpired:
+        return None, "swiftc 编译超时（%ds）" % int(compile_timeout)
+    except Exception as exc:
+        return None, "OCR 二进制准备失败：%s: %s" % (type(exc).__name__, exc)
+    finally:
+        if os.path.exists(temp_path):
+            try:
+                os.remove(temp_path)
+            except OSError:
+                pass
+
+
+def _page_kind(page):
+    """扫描页判定：整页位图覆盖 >70%，且文字层以不可见 OCR（texttrace type==3）为主。"""
+    page_rect = page.rect
+    area = float(page_rect.width) * float(page_rect.height)
+    if area <= 0:
+        return "vector"
+    big_image = False
+    try:
+        infos = page.get_image_info() or []
+    except Exception:
+        infos = []
+    for info in infos:
+        bbox = info.get("bbox")
+        if not bbox:
+            continue
+        width = max(0.0, float(bbox[2]) - float(bbox[0]))
+        height = max(0.0, float(bbox[3]) - float(bbox[1]))
+        if width * height / area > 0.7:
+            big_image = True
+            break
+    if not big_image:
+        return "vector"
+    try:
+        spans = page.get_texttrace() or []
+    except Exception:
+        spans = []
+    total = len(spans)
+    hidden = sum(1 for span in spans if span.get("type") == 3)
+    if total > 0 and hidden > 0 and hidden / float(total) >= 0.5:
+        return "scan"
+    return "vector"
+
+
+def _vision_ocr(page, clip, page_rect):
+    """把区域渲染成 PNG 交给 macOS Vision OCR；返回 (ocr dict 或 None, 错误原因)。"""
+    if str(os.environ.get("PR_OCR_ENABLED") or "1").strip().lower() in ("0", "false", "off", "no"):
+        return None, "OCR 已禁用（ocrEnabled=false）"
+    if "PR_OCR_TEXT" in os.environ:
+        return {"text": os.environ.get("PR_OCR_TEXT") or "", "engine": "vision", "ms": 0, "mocked": True}, None
+
+    binary, error = _ensure_ocr_binary()
+    if binary is None:
+        return None, error
+    try:
+        timeout_ms = int(os.environ.get("PR_OCR_TIMEOUT_MS") or 20000)
+    except (TypeError, ValueError):
+        timeout_ms = 20000
+
+    padded = (clip + (-OCR_PAD_PT, -OCR_PAD_PT, OCR_PAD_PT, OCR_PAD_PT)) & page_rect
+    if padded.is_empty or padded.width <= 0 or padded.height <= 0:
+        padded = clip
+    scale = max(1.0, min(16.0, OCR_TARGET_WIDTH_PX / max(1.0, float(padded.width))))
+    temp_png = None
+    started = time.time()
+    try:
+        pixmap = page.get_pixmap(matrix=fitz.Matrix(scale, scale), clip=padded, alpha=False)
+        handle, temp_png = tempfile.mkstemp(prefix="paper-reader-ocr-", suffix=".png")
+        os.close(handle)
+        pixmap.save(temp_png)
+        proc = subprocess.run(
+            [binary, temp_png],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            timeout=max(1.0, timeout_ms / 1000.0),
+        )
+        elapsed = int((time.time() - started) * 1000)
+        if proc.returncode != 0:
+            detail = (proc.stderr or b"").decode("utf-8", "replace").strip()[:300]
+            return None, "视觉 OCR 失败（退出码 %d）%s" % (proc.returncode, ("：" + detail) if detail else "")
+        text = (proc.stdout or b"").decode("utf-8", "replace").strip()
+        return {"text": text, "engine": "vision", "ms": elapsed, "scale": round(scale, 2)}, None
+    except subprocess.TimeoutExpired:
+        return None, "视觉 OCR 超时（%dms）" % timeout_ms
+    except Exception as exc:
+        return None, "视觉 OCR 失败：%s: %s" % (type(exc).__name__, exc)
+    finally:
+        if temp_png and os.path.exists(temp_png):
+            try:
+                os.remove(temp_png)
+            except OSError:
+                pass
+
+
 def region_cli(argv):
     """--region：框选区域 → 吸附矩形 + 行级重建（上下标标记），一次性 stdout JSON。"""
     if len(argv) != 5:
@@ -930,12 +1091,23 @@ def region_cli(argv):
                          round(item["bbox"].x1, 2), round(item["bbox"].y1, 2)],
             })
         region_text = "\n".join(line["text"] for line in lines_out)
+        page_kind = _page_kind(page)
+        ocr = None
+        if page_kind == "scan":
+            ocr_result, ocr_error = _vision_ocr(page, snapped, page_rect)
+            if ocr_result is not None:
+                ocr = ocr_result
+            else:
+                ocr = {"text": "", "engine": "vision", "ms": 0, "error": ocr_error or "视觉 OCR 不可用"}
+                warnings.append("视觉 OCR 不可用：%s" % (ocr_error or "未知原因"))
         print(json.dumps({
             "ok": True,
             "page": page_number,
+            "pageKind": page_kind,
             "rect": [round(snapped.x0, 2), round(snapped.y0, 2), round(snapped.x1, 2), round(snapped.y1, 2)],
             "lines": lines_out,
             "text": region_text,
+            "ocr": ocr,
             "warnings": warnings,
         }, ensure_ascii=False))
         sys.stdout.flush()

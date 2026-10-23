@@ -86,12 +86,13 @@ export async function readJsonBody(req, limitBytes = 1024 * 1024) {
  * 超时 / 非零退出 / 加密 / python 缺失都映射成带 code 的 PaperError。
  * @param {{pythonPath:string,args:string[],timeoutMs:number,label:string}} options
  */
-function runPythonJson({ pythonPath, args, timeoutMs = 120_000, label = '抽取' }) {
+function runPythonJson({ pythonPath, args, timeoutMs = 120_000, label = '抽取', env = process.env }) {
   return new Promise((resolve, reject) => {
     let child
     try {
       child = spawn(pythonPath, args, {
         stdio: ['ignore', 'pipe', 'pipe'],
+        env,
       })
     } catch (error) {
       reject(new PaperError('py-missing', `无法启动 Python（${pythonPath}）：${error.message}`, 503))
@@ -186,13 +187,14 @@ export function extractLinksOnly({ pythonPath, pdfPath, outDir, timeoutMs = 120_
  * 框选区域文字层：extract.py --region <pdf> <page> <x0,y0,x1,y1>（一次性子进程，无守护）。
  * @returns {Promise<{page:number,rect:number[],hasText:boolean,text:string}>}
  */
-export function extractRegion({ pythonPath, pdfPath, page, rect, timeoutMs = 120_000 }) {
+export function extractRegion({ pythonPath, pdfPath, page, rect, timeoutMs = 120_000, env = process.env }) {
   const rectArg = (Array.isArray(rect) ? rect : []).map(value => Number(value)).join(',')
   return runPythonJson({
     pythonPath: pythonPath || 'python3',
     args: [EXTRACT_SCRIPT, '--region', pdfPath, String(page), rectArg],
     timeoutMs,
     label: '区域抽取',
+    env,
   })
 }
 

@@ -39,6 +39,16 @@ import {
   summaryToggleLabel,
   summaryToggleTitle,
   renderMathHtml,
+  buildRegionLayerModel,
+  splitOcrLines,
+  isMathLikeText,
+  regionPageKind,
+  SCAN_BADGE_LABEL,
+  SCAN_OCR_TITLE,
+  SCAN_HIDDEN_TITLE,
+  SCAN_OCR_FALLBACK,
+  SCAN_NOTE,
+  VECTOR_HIDDEN_TITLE,
 } from '../explain.js';
 import {
   locateRange,
@@ -1017,6 +1027,95 @@ check('P2 fixture：解释/翻译/摘要答案含 LaTeX', () => {
     assert.ok(/\$[^$]+\$/.test(text), `${label}答案缺少行内 LaTeX`);
   }
   assert.ok(ex.entries.some((e) => e.answer.includes('$$')), '缺少块级 LaTeX');
+});
+
+// ---------- P3：扫描页徽标 + 双文字层 ----------
+
+const SCAN_REGION_SAMPLE = {
+  pageKind: 'scan',
+  page: 2,
+  ocrText: 'Ř=и(Š)+ẽ. (7)\n第二行：μ 与 ε 的视觉识别',
+  regionLines: [
+    { text: 'R = I_t(S) + 9.', kind: 'math' },
+    { text: 'hidden text line', kind: 'text' },
+  ],
+  regionText: 'R = I_t(S) + 9.',
+};
+
+check('scan 模型：徽标只在 scan 出现，OCR 段在前 + 隐藏层标注不可信', () => {
+  const scan = buildRegionLayerModel(SCAN_REGION_SAMPLE);
+  assert.equal(scan.scan, true);
+  assert.equal(scan.showScanBadge, true);
+  assert.equal(scan.badgeLabel, '扫描页 · OCR');
+  assert.equal(SCAN_BADGE_LABEL, '扫描页 · OCR');
+  assert.ok(scan.scanNote.includes('扫描件'));
+  assert.ok(scan.scanNote.includes('个别符号可能不准'));
+  assert.equal(SCAN_NOTE, scan.scanNote);
+  assert.equal(scan.ocrTitle, '视觉 OCR（高精度）');
+  assert.equal(SCAN_OCR_TITLE, scan.ocrTitle);
+  assert.equal(scan.hiddenTitle, '隐藏文字层（OCR，公式不可信）');
+  assert.equal(SCAN_HIDDEN_TITLE, scan.hiddenTitle);
+  assert.equal(scan.ocr.available, true);
+  assert.equal(scan.ocr.lines.length, 2);
+  assert.equal(scan.ocr.lines[0].text, 'Ř=и(Š)+ẽ. (7)');
+  assert.equal(scan.ocr.lines[0].kind, 'math');
+  assert.equal(scan.hidden.lines.length, 2);
+});
+
+check('vector 模型：不显示扫描徽标 / 不出现 OCR 段', () => {
+  const vector = buildRegionLayerModel({
+    pageKind: 'vector',
+    ocrText: '',
+    regionLines: [{ text: 'We employ a residual connection.', kind: 'text' }],
+  });
+  assert.equal(vector.scan, false);
+  assert.equal(vector.showScanBadge, false);
+  assert.equal(vector.scanNote, '');
+  assert.equal(vector.hiddenTitle, '区域文字层');
+  assert.equal(VECTOR_HIDDEN_TITLE, vector.hiddenTitle);
+  assert.equal(vector.ocr.available, false);
+  // 缺 pageKind 的老条目按矢量页处理
+  assert.equal(buildRegionLayerModel({}).showScanBadge, false);
+});
+
+check('scan 但 ocrText 为空：明确降级文案（不显示成正常）', () => {
+  const empty = buildRegionLayerModel({ pageKind: 'scan', ocrText: '', regionLines: [] });
+  assert.equal(empty.scan, true);
+  assert.equal(empty.ocr.available, false);
+  assert.equal(empty.ocr.fallback, '视觉 OCR 不可用（本机未安装编译工具或无权限）');
+  assert.equal(SCAN_OCR_FALLBACK, empty.ocr.fallback);
+  assert.equal(empty.ocr.lines.length, 0);
+});
+
+check('OCR 行拆分与公式行识别', () => {
+  assert.deepEqual(splitOcrLines('a\n\n b \r\nc'), ['a', 'b', 'c']);
+  assert.deepEqual(splitOcrLines(''), []);
+  assert.equal(isMathLikeText('Ř=и(Š)+ẽ. (7)'), true);
+  assert.equal(isMathLikeText('R = I_t(S) + 9.'), true);
+  assert.equal(isMathLikeText('这是一句普通中文'), false);
+  assert.equal(isMathLikeText(''), false);
+  assert.equal(regionPageKind('scan'), 'scan');
+  assert.equal(regionPageKind('vector'), 'vector');
+  assert.equal(regionPageKind(undefined), 'vector');
+});
+
+check('静态断言：扫描页 UI / fixture 字段 / mock 支持', () => {
+  for (const token of ['扫描页 · OCR', '视觉 OCR（高精度）', '隐藏文字层（OCR，公式不可信）', '视觉 OCR 不可用（本机未安装编译工具或无权限）', 'badge badge-scan', 'thread-scan-note']) {
+    assert.ok(explainJs.includes(token), `explain.js 缺少 ${token}`);
+  }
+  for (const token of ['.badge-scan', '.thread-scan-note', '.region-ocr-missing']) {
+    assert.ok(css.includes(token), `styles.css 缺少 ${token}`);
+  }
+  const ex = readJson('fixture/explanations.json');
+  const scanEntry = ex.entries.find((e) => e.id === 'e_region02');
+  const vectorEntry = ex.entries.find((e) => e.id === 'e_region01');
+  assert.equal(scanEntry.pageKind, 'scan');
+  assert.equal(scanEntry.ocrText, 'Ř=и(Š)+ẽ. (7)');
+  assert.equal(vectorEntry.pageKind, 'vector');
+  assert.equal(vectorEntry.ocrText, '');
+  assert.ok(mockJs.includes('regionPageKindFor'));
+  assert.ok(mockJs.includes("ocrText: regionOcrTextFor(page)"));
+  assert.ok(mockJs.includes('SCAN_OCR_SAMPLE'));
 });
 
 // ---------- 汇总 ----------

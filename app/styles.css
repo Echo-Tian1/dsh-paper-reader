@@ -1955,3 +1955,37 @@ button { user-select: none; -webkit-user-select: none; }
 @media (max-width: 1040px) {
   .docs-select { max-width: 140px; }
 }
+
+/* ---------- P3 扫描页徽标 + 双文字层 ---------- */
+.badge-scan {
+  color: #b45309;
+  border-color: color-mix(in srgb, #d97706 35%, transparent);
+  background: color-mix(in srgb, #d97706 14%, transparent);
+}
+:root[data-theme="dark"] .badge-scan { color: #f0b35a; }
+@media (prefers-color-scheme: dark) {
+  :root[data-theme="auto"] .badge-scan { color: #f0b35a; }
+}
+.thread-scan-note {
+  margin-top: 6px;
+  padding: 6px 9px;
+  border-radius: 6px;
+  font-size: 11.5px;
+  line-height: 1.6;
+  color: var(--pr-muted);
+  background: var(--pr-soft);
+  border-left: 2px solid color-mix(in srgb, #d97706 55%, transparent);
+}
+.region-ocr-missing {
+  margin-top: 6px;
+  padding: 6px 9px;
+  border-radius: 6px;
+  font-size: 11.5px;
+  line-height: 1.6;
+  color: var(--pr-muted);
+  background: color-mix(in srgb, var(--pr-danger) 7%, var(--pr-bg));
+  border-left: 2px solid color-mix(in srgb, var(--pr-danger) 45%, transparent);
+}
+.region-lines { font-family: var(--pr-mono); }
+.region-lines-ocr .region-line-text { color: var(--pr-fg); }
+.region-lines-hidden .region-line-text { color: var(--pr-muted); }

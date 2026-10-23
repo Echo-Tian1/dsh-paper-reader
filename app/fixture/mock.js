@@ -29,10 +29,20 @@ let annotationCache = null;
 let summaryState = null;
 let summaryLoaded = false;
 let summaryAttempts = 0;
+const SCAN_OCR_SAMPLE = 'Ř=и(Š)+ẽ. (7)';
 const SUMMARY_EMPTY = new URLSearchParams(location.search).get('nosummary') === '1';
 const SUMMARY_ERROR_ONCE = new URLSearchParams(location.search).get('sumerr') === '1';
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+function regionPageKindFor(page) {
+  return Number(page) === 1 ? 'vector' : 'scan';
+}
+
+function regionOcrTextFor(page) {
+  // 模拟用户那篇扫描件的视觉 OCR：μ 被认成 и、ε 被认成 ẽ 等
+  return Number(page) === 2 ? SCAN_OCR_SAMPLE : '';
+}
 
 function normalize(text) {
   return String(text || '')
@@ -510,6 +520,8 @@ async function mockExplainRegion(body) {
     rect,
     regionText,
     regionLines,
+    pageKind: regionPageKindFor(page),
+    ocrText: regionOcrTextFor(page),
     contextHash: 'mock-region-context',
     provider: 'fixture',
     model: 'fixture-mock',

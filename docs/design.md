@@ -333,6 +333,18 @@ $DSH_HOME/plugin-data/paper-reader/          # 默认 ~/.dsh/plugin-data/paper-r
 3. **命中区**：`.icon-btn` 34×34、`.btn` ≥32 高、`.tab` 34 高、`.tb-btn` 32 高；
    Playwright 实测 31 个关键按钮最小 32×32，1000/1200/1440 三档无溢出。
 
+## 修复轮（2026-10-23 第六轮）：扫描页公式识别
+
+用户反馈「框选公式还是识别不准」。复查其论文后发现：**整篇 16/17 页是扫描页**（整页位图 3650×5450 + `3 Tr` 隐藏 OCR 文字层），
+隐藏层把 `R̃ = μ(S̃) + ε̃` 识别成 `R = I_t(S) + 9.`——纯文字层无法修复，必须视觉识别。
+
+方案：**本机 Vision OCR + 三方对账**
+- 页面类型检测：位图覆盖 >70% 且不可见文字占比 ≥50% → `pageKind:scan`；
+- 扫描页区域：外扩 9pt、渲染到宽 ~1800px → `ocr.swift`（macOS Vision，懒编译缓存到 `plugin-data/paper-reader/bin/ocr-<hash>`）；
+- 提示词：同时给「隐藏文字层（公式不可信）」「视觉 OCR（高精度）」「前后段正文」和常见混淆（Ř→R̃、Š→S̃、ẽ→ε̃、и→μ、9→ε），要求先还原 LaTeX、不确定标「不确定」；
+- 缓存键纳入 `ocrText`；entry 回传 `pageKind`/`ocrText`，阅读器用双文字层透明展示。
+- 实测：`ocr.text = 'Ř=u(Š) +Ẽ. (7)'` + 上下文 → 模型输出 `\tilde{R}=\mu(\tilde{S})+\tilde{\varepsilon}`，4.6s / 1183 tokens；二次缓存 0.49s。
+
 ## 已知取舍与风险
 
 - **左坞依赖布局适配**（给 `AppFrame` 加 `paddingLeft` + 隐藏错位的左拖拽把手）。DSH 大改版可能失效；已设计为单一适配文件 `layout-adapter.js`，失效时只改这里，且有固定浮层 / 独立窗口两条退化路径。

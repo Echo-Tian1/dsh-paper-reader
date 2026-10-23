@@ -179,19 +179,22 @@ describe('三类缓存键', () => {
     assert.notEqual(key, translateKey('ffffffffffffffff', 'p16', 'hello world'))
   })
 
-  it('regionKey 与契约公式一致；rect 只取到 0.1pt', () => {
-    const key = regionKey(DOC_ID, 4, [100.04, 200.06, 300, 400.02], 'softmax text')
+  it('regionKey 与契约公式一致；rect 只取到 0.1pt；ocrText 参与', () => {
+    const key = regionKey(DOC_ID, 4, [100.04, 200.06, 300, 400.02], 'softmax text', 'Ř=и(Š)+ẽ. (7)')
     assert.match(key, /^[0-9a-f]{64}$/)
     assert.equal(
       key,
-      sha256(`${DOC_ID}|region-v1|4|100,200.1,300,400|${sha1('softmax text')}`),
+      sha256(`${DOC_ID}|region-v1|4|100,200.1,300,400|${sha1('softmax text')}|${sha1('Ř=и(Š)+ẽ. (7)')}`),
     )
     assert.equal(
-      regionKey(DOC_ID, 4, [100.0, 200.1, 300, 400], 'softmax text'),
+      regionKey(DOC_ID, 4, [100.0, 200.1, 300, 400], 'softmax text', 'Ř=и(Š)+ẽ. (7)'),
       key,
     )
-    assert.notEqual(regionKey(DOC_ID, 5, [100, 200.1, 300, 400], 'softmax text'), key)
-    assert.notEqual(regionKey(DOC_ID, 4, [100, 200.1, 300, 400], 'other text'), key)
+    assert.notEqual(regionKey(DOC_ID, 5, [100, 200.1, 300, 400], 'softmax text', 'Ř=и(Š)+ẽ. (7)'), key)
+    assert.notEqual(regionKey(DOC_ID, 4, [100, 200.1, 300, 400], 'other text', 'Ř=и(Š)+ẽ. (7)'), key)
+    // OCR 结果变了必须 miss
+    assert.notEqual(regionKey(DOC_ID, 4, [100, 200.1, 300, 400], 'softmax text', 'Ř=u(Š)+Ẽ. (7)'), key)
+    assert.notEqual(regionKey(DOC_ID, 4, [100, 200.1, 300, 400], 'softmax text', ''), key)
     assert.equal(roundRect1([1.234, 2.345, 3.456, 4.567]), '1.2,2.3,3.5,4.6')
   })
 })
@@ -232,6 +235,8 @@ describe('extract.py --region 子命令', SKIP_NO_FIXTURE, () => {
     const result = JSON.parse(lines[0])
     assert.equal(result.ok, true)
     assert.equal(result.page, 4)
+    assert.equal(result.pageKind, 'vector')
+    assert.equal(result.ocr, null)
     assert.equal(result.rect.length, 4)
     assert.ok(result.rect.every(value => Number.isFinite(value)))
     // 吸附：不再是原始拖动框，而是扩展成完整文本行的并集
@@ -280,6 +285,8 @@ describe('extract.py --region 子命令', SKIP_NO_FIXTURE, () => {
     assert.equal(run.status, 0, String(run.stderr))
     const result = JSON.parse(String(run.stdout).trim())
     assert.equal(result.ok, true)
+    assert.equal(result.pageKind, 'vector')
+    assert.equal(result.ocr, null)
     assert.deepEqual(result.lines, [])
     assert.equal(result.text.trim(), '')
     assert.ok(Array.isArray(result.warnings) && result.warnings.length > 0)

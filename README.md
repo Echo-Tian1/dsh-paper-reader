@@ -77,6 +77,10 @@
 
 ![公式渲染](docs/screenshots/formula-after.png)
 
+**扫描件里的公式：本机 OCR + 三方对账，识别错的不硬猜**
+
+![扫描页 OCR](docs/screenshots/scan-ocr.png)
+
 **Shift 框选公式区域 → 逐符号解释**
 
 ![框选公式](docs/screenshots/region-formula.png)
@@ -115,6 +119,7 @@
 
 - macOS + 已安装 DeepSeek Harness（本插件是 DSH 插件，宿主与客户端都在 DSH 里运行）；
 - `python3`（系统自带即可）并安装 PyMuPDF：`python3 -m pip install PyMuPDF`；
+- 可选：Xcode Command Line Tools（`xcode-select --install`）——扫描页公式识别用 macOS Vision OCR；没装也能用，只是扫描页会退化成只用隐藏文字层并给出提示；
 - DSH 里已配置好 DeepSeek API Key（解释/翻译走本机 DSH 的 LLM 路由）。
 
 **安装到 DSH**
@@ -252,7 +257,8 @@ node app/fixture/selfcheck.mjs
 
 ## 已知边界
 
-- **只支持带文字层的 PDF**：扫描件能显示但选不中（页面会提示）；
+- **只支持带文字层的 PDF**：扫描件能显示但选不中（页面会提示）；扫描页公式走本机 Vision OCR，个别符号仍可能混淆——回答里会标「不确定」，不会硬猜；
+- **纯图片页（没有隐藏文字层）** 目前不会触发视觉 OCR（避免把矢量插图误判成扫描页）；
 - **公式/图区域选不中**：公式多是矢量字形，走「Shift 框选 → 区域文字层 + 上下文」解释；**本插件不把图片发给模型**（DeepSeek 适配器是纯文本的），纯图区域会明确说明只能按上下文推测；
 - **段落与切句是启发式**：极少数 PDF 会把整栏并成一段，解释始终带整段与相邻段上下文；
 - **跨页选区只高亮起始页**；双开对照显示目标页页图但不滚动到精确坐标；

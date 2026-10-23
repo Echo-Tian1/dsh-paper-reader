@@ -108,7 +108,9 @@
       104
      ]
     }
-   ]
+   ],
+   "pageKind": "vector",
+   "ocrText": ""
   },
   {
    "id": "e_region02",
@@ -147,7 +149,9 @@
       100
      ]
     }
-   ]
+   ],
+   "pageKind": "scan",
+   "ocrText": "Ř=и(Š)+ẽ. (7)"
   }
  ]
 }

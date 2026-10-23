@@ -149,9 +149,12 @@ export function roundRect1(rect) {
     .join(',')
 }
 
-/** 框选区域缓存键：sha256(docId|region-v1|page|rect 取整 0.1pt|sha1(regionText))。 */
-export function regionKey(docId, page, rect, regionText) {
-  return sha256(`${docId}|${REGION_RECIPE}|${page}|${roundRect1(rect)}|${sha1(regionText)}`)
+/**
+ * 框选区域缓存键：sha256(docId|region-v1|page|rect 取整 0.1pt|sha1(regionText)|sha1(ocrText))。
+ * ocrText 必须参与：视觉 OCR 结果变了（或从失败变成功）就要 miss。
+ */
+export function regionKey(docId, page, rect, regionText, ocrText = '') {
+  return sha256(`${docId}|${REGION_RECIPE}|${page}|${roundRect1(rect)}|${sha1(regionText)}|${sha1(ocrText)}`)
 }
 
 /** 单个字符是否算 CJK（汉字 / 中文标点 / 全角）。 */

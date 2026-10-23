@@ -13,6 +13,7 @@ $DSH_HOME/plugin-data/paper-reader/      # 默认 ~/.dsh/plugin-data/paper-reade
 ├── index.json                 # 文档索引
 ├── ui-state.json              # 最近打开的论文 / 每篇最后页码
 ├── tmp/                       # 上传中 / 抽取中的中间产物
+├── bin/                       # OCR 二进制缓存（ocr-<ocr.swift 源码 hash>，macOS Vision）
 └── docs/<id>/
     ├── source.pdf
     ├── structure.json
@@ -195,11 +196,18 @@ stdout 一行 JSON：
 - **吸附**：取与拖动矩形相交的所有文本行（垂直重叠 > 40%），把矩形扩展成这些行的并集；这样框边缘不会被切掉半个字符。
 - **上下标**：PyMuPDF span 的 `flags & 1` 是上标；字号 < 0.8×行内中位数且基线更低视为下标，分别包成 `^{…}` / `_{…}`。
 - **kind**：该行数学/符号字符占比高、或使用了数学字体、或居中排版 → `math`，否则 `text`；`lines` 按阅读顺序返回。
+- **扫描页**：当页面主体是一张位图、且文字层是不可见 OCR（texttrace render mode 3）时，`pageKind = "scan"`，
+  并把区域裁剪后交给本机视觉 OCR（macOS Vision，`ocr.swift`），结果放在 `ocr: { text, engine, ms }`；识别失败时 `ocr.error` 说明原因。
+  矢量页 `pageKind = "vector"`，`ocr = null`。
+- **区域缓存键**：`sha256(docId + '|region-v1|' + page + '|' + round(rect) + '|' + sha1(regionText) + '|' + sha1(ocrText))`；
+  扫描页的 `ocrText` 变化必须 miss（OCR 结果受渲染比例/模型版本影响）。
+- 扫描页的隐藏文字层**公式不可信**（OCR 把 μ 认成 I_t、ε 认成 9 之类），提示词必须把两份文本都给出并要求对账。
 
 ### `POST /api/explain-region`
 框选区域（公式/图）解释。请求：
 `{ "docId": "...", "page": 4, "rect": [x0,y0,x1,y1], "force": false }`（rect 为 PDF 点坐标，原点左上）
-响应同上 SSE；`meta.kind = "region"`；`done.entry.kind = "region"`，并带 `rect`（**吸附后的矩形**，客户端用它画区域框/缩略图）与 `regionText`（带 `^{}`/`_{}` 标注）、`regionLines`（按行，含 kind）。
+响应同上 SSE；`meta.kind = "region"`；`done.entry.kind = "region"`，并带 `rect`（**吸附后的矩形**，客户端用它画区域框/缩略图）、`regionText`（带 `^{}`/`_{}` 标注）、
+`regionLines`（按行，含 kind）、`pageKind`（`scan`/`vector`）与 `ocrText`（扫描页的视觉 OCR 结果，客户端展示「视觉 OCR」用）。
 宿主用 PyMuPDF 的 `clip` 抽取该区域文字层，并用与区域相交最多的段落作为上下文。
 区域没有文字层时不报错，模型只能依据上下文推测（回答里会说明）。
 
@@ -291,6 +299,9 @@ region    : sha256(docId + '|region-v1|' + page + '|' + rectRound1pt + '|' + sha
 ```
 
 ## 6. 解释提示词（recipe v2）
+
+**扫描页区域对账**：`pageKind = "scan"` 时，区域提示词必须同时给出「隐藏文字层（OCR，公式不可信）」「视觉 OCR（高精度，可能字形混淆）」「公式前后段正文」，
+并说明常见混淆（Ř→R̃、Š→S̃、ẽ→ε̃、и→μ、9→ε 等），要求以视觉 OCR 为主、结合上下文标准记号还原 LaTeX，不确定的符号标「不确定」。
 
 **数学表达统一用 LaTeX**：行内公式写成 `$...$`，独立公式写成 `$$...$$`；不要用纯文本拼分数/上下标/根号。
 客户端用 KaTeX 渲染（离线随插件分发），宿主不做任何转换。这条适用于解释 / 翻译 / 区域解释 / 摘要。

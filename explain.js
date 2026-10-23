@@ -35,6 +35,7 @@ import {
   readExplanations,
   readStructure,
   regionKey,
+  storeDir,
   summaryKey,
   targetLanguage,
   translateKey,
@@ -74,6 +75,19 @@ export const REGION_SYSTEM_PROMPT = `你是一位耐心的学术论文阅读助�
 识别不确定的符号要标注「不确定」）
 ### 2. 符号与含义
 （逐条解释公式里的符号、变量、箭头、缩写；图/表则说明各部分含义；没有则写「无」）
+### 3. 与上下文的关系
+（2-4 行：这块内容在所在段落/章节里承担什么作用，与前后文怎么衔接）
+不要输出开场白、总结、免责声明。`
+
+/** 扫描页区域对账 system（隐藏文字层 + Vision OCR + 前后段；以视觉 OCR 为主）。 */
+export const SCAN_REGION_SYSTEM_PROMPT = `你是一位耐心的学术论文阅读助教。用户框选的区域来自**扫描页**：页面主体是位图，文字层是不可见的 OCR（公式不可信），宿主另外用本机视觉 OCR（macOS Vision）对渲染图做了二次识别。
+你会同时收到三份材料：1) 隐藏文字层（不可见 OCR，公式可能严重误认，如 μ→I_t、ε→9）；2) 视觉 OCR（对图像识别，精度更高但可能有字形混淆）；3) 公式前后两段正文（用来判断标准记号）。
+常见混淆：Ř→R̃、Š→S̃、ẽ→ε̃、Ẽ→ε̃、и→μ、u→μ、9→ε、I_t→μ 等；带波浪号的变量常被认成普通字母。
+请按下面要求作答（Markdown，必须且只能包含三节）：
+### 1. 内容还原
+（以视觉 OCR 为主、结合隐藏文字层与上下文的标准记号，先把区域还原成 LaTeX 公式放在 $$...$$ 里；不确定的符号标注「不确定」；如果区域不是公式，说明它是什么；如果含有正文残片，用引用块单独列出）
+### 2. 符号与含义
+（逐条解释公式里的符号、变量、箭头、缩写；没有则写「无」）
 ### 3. 与上下文的关系
 （2-4 行：这块内容在所在段落/章节里承担什么作用，与前后文怎么衔接）
 不要输出开场白、总结、免责声明。`
@@ -889,6 +903,14 @@ export async function serveRegion({ ctx, config, env = process.env, req, res }) 
       page,
       rect: clamped,
       timeoutMs: config.extractTimeoutMs,
+      // 扫描页视觉 OCR：OCR 二进制缓存目录与配置项通过 env 传给 python
+      env: {
+        ...process.env,
+        PR_PLUGIN_DATA: storeDir(env),
+        PR_OCR_ENABLED: config.ocrEnabled === false ? '0' : '1',
+        PR_OCR_TIMEOUT_MS: String(Number(config.ocrTimeoutMs) || 20_000),
+        PR_SWIFTC: String(config.swiftcPath || 'swiftc'),
+      },
     })
   } catch (error) {
     respondError(res, error)
@@ -900,12 +922,18 @@ export async function serveRegion({ ctx, config, env = process.env, req, res }) 
     : clamped
   const regionText = typeof extracted?.text === 'string' ? extracted.text : ''
   const regionLines = Array.isArray(extracted?.lines) ? extracted.lines : []
+  const pageKind = extracted?.pageKind === 'scan' ? 'scan' : 'vector'
+  const scan = pageKind === 'scan'
+  const ocr = extracted?.ocr && typeof extracted.ocr === 'object' ? extracted.ocr : null
+  const ocrText = scan && typeof ocr?.text === 'string' ? ocr.text : ''
+  const ocrError = scan && typeof ocr?.error === 'string' ? ocr.error : null
 
   const kind = 'region'
   const force = body.force === true
   const recipe = REGION_RECIPE
   const rounded = snapped.map(value => Math.round(value * 100) / 100)
-  const key = regionKey(docId, page, rounded, regionText)
+  // 缓存键包含 ocrText：视觉 OCR 结果变了（或从失败变成功）必须 miss
+  const key = regionKey(docId, page, rounded, regionText, ocrText)
   const entries = await readExplanations(docId, env)
   const latest = latestByKey(entries).get(key) ?? null
   if (latest && typeof latest.answer === 'string' && latest.answer.trim() && !force) {
@@ -929,7 +957,7 @@ export async function serveRegion({ ctx, config, env = process.env, req, res }) 
   const { prev, next } = neighborParas(structure.paras ?? [], para?.id ?? '')
   const section = sectionOf(structure, para)
   const paraText = truncate(para?.text ?? '', PARA_TEXT_LIMIT)
-  const userText = [
+  const vectorUserText = [
     `论文：${structure.title ?? ''}`,
     `位置：第 ${page} 页 · ${section?.title ?? '（未知章节）'}`,
     `框选区域：第 ${page} 页 [${rounded.join(', ')}]（PDF 点坐标，原点左上）`,
@@ -941,6 +969,25 @@ export async function serveRegion({ ctx, config, env = process.env, req, res }) 
     `前一段：${truncate(prev?.text ?? '', NEIGHBOR_LIMIT) || '（无）'}`,
     `后一段：${truncate(next?.text ?? '', NEIGHBOR_LIMIT) || '（无）'}`,
   ].join('\n')
+  const scanUserText = [
+    `论文：${structure.title ?? ''}`,
+    `位置：第 ${page} 页 · ${section?.title ?? '（未知章节）'}`,
+    `框选区域：第 ${page} 页 [${rounded.join(', ')}]（PDF 点坐标，原点左上；pageKind=scan：扫描页，隐藏文字层公式不可信）`,
+    '隐藏文字层（不可见 OCR；公式可能严重误认，如 μ→I_t、ε→9）：',
+    '<<<',
+    linesBlock,
+    '>>>',
+    '视觉 OCR（本机 macOS Vision 对渲染图识别；精度更高但可能有字形混淆）：',
+    '<<<',
+    ocrText.trim() || `（视觉 OCR 不可用：${ocrError || '未知原因'}；请只依据隐藏文字层与上下文作答，并标注不确定）`,
+    '>>>',
+    '常见混淆：Ř→R̃、Š→S̃、ẽ→ε̃、Ẽ→ε̃、и→μ、u→μ、9→ε、I_t→μ 等；带波浪号的变量可能被认成普通字母。以视觉 OCR 为主、结合上下文的标准记号还原。',
+    `所在段落：${paraText || '（无）'}`,
+    `前一段：${truncate(prev?.text ?? '', NEIGHBOR_LIMIT) || '（无）'}`,
+    `后一段：${truncate(next?.text ?? '', NEIGHBOR_LIMIT) || '（无）'}`,
+  ].join('\n')
+  const userText = scan ? scanUserText : vectorUserText
+  const systemPrompt = scan ? SCAN_REGION_SYSTEM_PROMPT : REGION_SYSTEM_PROMPT
   const id = `e_${randomBytes(8).toString('hex')}`
   const provider = config.provider
   const model = config.model
@@ -955,7 +1002,7 @@ export async function serveRegion({ ctx, config, env = process.env, req, res }) 
     page,
     paraId: para?.id ?? '',
     sectionId: section?.id ?? para?.sectionId ?? '',
-    contextHash: hashContext(recipe, REGION_SYSTEM_PROMPT, userText),
+    contextHash: hashContext(recipe, systemPrompt, userText),
     provider,
     model,
     answer: '',
@@ -965,6 +1012,8 @@ export async function serveRegion({ ctx, config, env = process.env, req, res }) 
     supersedes: latest?.id ?? null,
     rect: rounded,
     regionText,
+    pageKind,
+    ...(scan ? { ocrText } : {}),
     ...(regionLines.length > 0 ? { regionLines } : {}),
   }
 
@@ -973,7 +1022,7 @@ export async function serveRegion({ ctx, config, env = process.env, req, res }) 
   const request = {
     provider: config.provider,
     model: config.model,
-    system: REGION_SYSTEM_PROMPT,
+    system: systemPrompt,
     messages: [{ role: 'user', content: [{ type: 'text', text: userText }] }],
     temperature: config.temperature,
     maxTokens: config.maxTokens,

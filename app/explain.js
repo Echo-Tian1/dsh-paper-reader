@@ -745,7 +745,7 @@ export async function explainRegion({ page, rect, force = false } = {}) {
     kind: 'region',
     sel: { page: Number(page), paraId: '', text: '' },
     ctx: {},
-    region: { page: Number(page), rect: normalized, regionText: '', regionLines: [] },
+    region: { page: Number(page), rect: normalized, regionText: '', regionLines: [], pageKind: '', ocrText: '' },
     force,
     send: (signal) => deps.api.explainRegionStream({ docId, page: Number(page), rect: normalized, force: !!force }, signal),
   });
@@ -775,6 +775,8 @@ export function openEntry(entry) {
           rect: Array.isArray(entry.rect) ? entry.rect.map(Number) : null,
           regionText: entry.regionText || '',
           regionLines: Array.isArray(entry.regionLines) ? entry.regionLines : [],
+          pageKind: entry.pageKind === 'scan' ? 'scan' : entry.pageKind === 'vector' ? 'vector' : '',
+          ocrText: typeof entry.ocrText === 'string' ? entry.ocrText : '',
         }
       : null;
   current = {
@@ -1009,6 +1011,12 @@ function handleEvent(ev) {
           rect: rect ? rect.map(Number) : null,
           regionText: current.entry?.regionText || current.region?.regionText || '',
           regionLines: Array.isArray(lines) ? lines : [],
+          pageKind: current.entry?.pageKind === 'scan' || current.entry?.pageKind === 'vector'
+            ? current.entry.pageKind
+            : current.region?.pageKind || '',
+          ocrText: typeof current.entry?.ocrText === 'string'
+            ? current.entry.ocrText
+            : current.region?.ocrText || '',
         };
       }
       if (current.kind === 'translate' && !current.translateText) {
@@ -1102,6 +1110,115 @@ function renderThread() {
   root.scrollTop = scrollTop;
 }
 
+// ---------- 扫描页 / 双文字层（纯函数，便于单测） ----------
+
+export const SCAN_BADGE_LABEL = '扫描页 · OCR';
+export const SCAN_NOTE = '本页是扫描件，公式按视觉 OCR + 上下文还原，个别符号可能不准';
+export const SCAN_OCR_TITLE = '视觉 OCR（高精度）';
+export const SCAN_HIDDEN_TITLE = '隐藏文字层（OCR，公式不可信）';
+export const VECTOR_HIDDEN_TITLE = '区域文字层';
+export const SCAN_OCR_FALLBACK = '视觉 OCR 不可用（本机未安装编译工具或无权限）';
+
+export function regionPageKind(pageKind) {
+  return pageKind === 'scan' ? 'scan' : 'vector';
+}
+
+/** 粗判一行文本是否像公式（OCR 行没有宿主 kind，只能按字符判断）。 */
+export function isMathLikeText(text) {
+  const s = String(text == null ? '' : text);
+  if (!s.trim()) return false;
+  if (/[=≈≠≤≥<>√∑∫^_]/.test(s)) return true;
+  if (/\\[a-zA-Z]+/.test(s)) return true;
+  // 常见 OCR 混淆字符 / 希腊字母 / 数学字体变量
+  return /[ŘŠẽμσεδθλπΩΔΣ]/.test(s);
+}
+
+export function splitOcrLines(text) {
+  return String(text == null ? '' : text)
+    .replace(/\r\n?/g, '\n')
+    .split('\n')
+    .map((line) => line.trim())
+    .filter(Boolean);
+}
+
+/**
+ * 区域文字层展示模型：
+ * - scan：视觉 OCR（高精度，放前面）+ 隐藏文字层（公式不可信）；
+ * - vector：只有原有「区域文字层」；
+ * - scan 且 ocrText 为空：available=false + 明确降级文案（不显示成正常）。
+ */
+export function buildRegionLayerModel(region = {}) {
+  const pageKind = regionPageKind(region.pageKind);
+  const scan = pageKind === 'scan';
+  const hiddenLines = Array.isArray(region.regionLines)
+    ? region.regionLines.filter((line) => line && typeof line.text === 'string')
+    : [];
+  const ocrLines = splitOcrLines(region.ocrText).map((text) => ({
+    text,
+    kind: isMathLikeText(text) ? 'math' : 'text',
+  }));
+  return {
+    pageKind,
+    scan,
+    showScanBadge: scan,
+    badgeLabel: SCAN_BADGE_LABEL,
+    scanNote: scan ? SCAN_NOTE : '',
+    ocrTitle: SCAN_OCR_TITLE,
+    hiddenTitle: scan ? SCAN_HIDDEN_TITLE : VECTOR_HIDDEN_TITLE,
+    ocr: {
+      available: ocrLines.length > 0,
+      lines: ocrLines,
+      fallback: SCAN_OCR_FALLBACK,
+    },
+    hidden: {
+      lines: hiddenLines,
+      text: region.regionText || '',
+    },
+  };
+}
+
+function renderRegionLineRow(line) {
+  const row = document.createElement('div');
+  row.className = line.kind === 'math' ? 'region-line region-line-math' : 'region-line';
+  if (line.kind === 'math') row.appendChild(h('span', 'region-line-kind', '公式'));
+  row.appendChild(h('span', 'region-line-text', line.text));
+  return row;
+}
+
+function renderRegionSourceDetails(model) {
+  const nodes = [];
+  const appendDetails = (title, lines, text, className) => {
+    const detail = document.createElement('details');
+    detail.className = 'thread-source';
+    const summary = document.createElement('summary');
+    summary.textContent = lines.length ? `${title} · ${lines.length} 行` : title;
+    const body = document.createElement('div');
+    body.className = `region-lines${className ? ` ${className}` : ''}`;
+    if (lines.length) {
+      for (const line of lines) body.appendChild(renderRegionLineRow(line));
+    } else if (text) {
+      body.textContent = text;
+    } else {
+      body.appendChild(h('div', 'thread-extra-meta', '该区域没有文字层，回答只能依据上下文推测。'));
+    }
+    detail.append(summary, body);
+    nodes.push(detail);
+  };
+
+  if (model.scan) {
+    // 视觉 OCR 放前面（高可信）；空结果给明确降级文案
+    if (model.ocr.available) {
+      appendDetails(model.ocrTitle, model.ocr.lines, '', 'region-lines-ocr');
+    } else {
+      nodes.push(h('div', 'region-ocr-missing', model.ocr.fallback));
+    }
+    appendDetails(model.hiddenTitle, model.hidden.lines, model.hidden.text, 'region-lines-hidden');
+    return nodes;
+  }
+  appendDetails(model.hiddenTitle, model.hidden.lines, model.hidden.text, 'region-lines-hidden');
+  return nodes;
+}
+
 function renderHeadCard() {
   const card = h('div', 'thread-sel');
   const page = current.ctx?.page || current.sel.page || current.region?.page;
@@ -1128,9 +1245,11 @@ function renderHeadCard() {
   if (current.kind === 'region') {
     const region = current.region || {};
     const rect = Array.isArray(region.rect) ? region.rect : null;
+    const layerModel = buildRegionLayerModel(region);
     const label = h('div', 'thread-sel-label');
     label.appendChild(h('span', '', '框选区域'));
     label.appendChild(h('span', 'badge badge-region', kindLabel('region')));
+    if (layerModel.showScanBadge) label.appendChild(h('span', 'badge badge-scan', layerModel.badgeLabel));
     card.appendChild(label);
     appendRegionThumbnail(card, region);
     const sizeText = rect
@@ -1140,32 +1259,8 @@ function renderHeadCard() {
     metaRow.appendChild(h('span', '', `第 ${region.page || page || '?'} 页${sizeText ? ` · ${sizeText}` : ''}`));
     if (section) metaRow.appendChild(h('span', '', section));
     card.appendChild(metaRow);
-    const sourceLines = Array.isArray(region.regionLines)
-      ? region.regionLines.filter((line) => line && typeof line.text === 'string')
-      : [];
-    if (sourceLines.length || region.regionText) {
-      const detail = document.createElement('details');
-      detail.className = 'thread-source';
-      const summary = document.createElement('summary');
-      summary.textContent = sourceLines.length ? `区域文字层 · ${sourceLines.length} 行` : '区域文字层';
-      const body = document.createElement('div');
-      if (sourceLines.length) {
-        body.className = 'region-lines';
-        for (const line of sourceLines) {
-          const row = document.createElement('div');
-          row.className = line.kind === 'math' ? 'region-line region-line-math' : 'region-line';
-          if (line.kind === 'math') row.appendChild(h('span', 'region-line-kind', '公式'));
-          row.appendChild(h('span', 'region-line-text', line.text));
-          body.appendChild(row);
-        }
-      } else {
-        body.textContent = region.regionText;
-      }
-      detail.append(summary, body);
-      card.appendChild(detail);
-    } else {
-      card.appendChild(h('div', 'thread-extra-meta', '该区域没有文字层，回答只能依据上下文推测。'));
-    }
+    if (layerModel.scanNote) card.appendChild(h('div', 'thread-scan-note', layerModel.scanNote));
+    for (const node of renderRegionSourceDetails(layerModel)) card.appendChild(node);
     return card;
   }
 

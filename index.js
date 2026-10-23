@@ -69,6 +69,10 @@ export const DEFAULTS = {
   pythonPath: 'python3',
   maxUploadMB: 80,
   extractTimeoutMs: 120_000,
+  // 扫描页视觉 OCR（macOS Vision，ocr.swift 懒编译）
+  ocrEnabled: true,
+  ocrTimeoutMs: 20_000,
+  swiftcPath: 'swiftc',
 }
 
 /** 阅读器静态页默认目录（构建时与 index.js 同目录）。 */
