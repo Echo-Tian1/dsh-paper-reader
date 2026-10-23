@@ -198,7 +198,7 @@ async function main() {
       paper.addExplanation(entry);
       explain.invalidateHistory();
     },
-    sendToChat: (payload) => bridge.toChat(payload, 'draft'),
+    sendToChat: (payload) => requestChatRoute(payload),
     toast,
   });
 
@@ -783,17 +783,80 @@ function handleHostTheme(theme) {
   if (theme?.mode) updateNarrow();
 }
 
+/** 「转到对话」进行中的一次请求（等待宿主的 chat-ack）。 */
+let pendingChat = null;
+
+/**
+ * 把文本直接写进父窗口（DSH）的编辑器。
+ * 兼容兜底通道：当薄壳的会话服务桥接失败时，同源 iframe 仍可直接操作父页面 DOM。
+ * React 受控 textarea 必须用原型上的 value setter 写值，再派发 input 事件。
+ */
+function injectIntoParentComposer(text) {
+  try {
+    const doc = window.parent && window.parent !== window ? window.parent.document : null;
+    if (!doc) return false;
+    const boxes = [...doc.querySelectorAll('textarea')];
+    const target = boxes.find((el) => !el.disabled && !el.readOnly && el.offsetParent !== null) || boxes[0];
+    if (!target) return false;
+    target.focus();
+    const proto = Object.getPrototypeOf(target);
+    const setter = Object.getOwnPropertyDescriptor(proto, 'value')?.set;
+    if (setter) setter.call(target, text);
+    else target.value = text;
+    target.dispatchEvent(new Event('input', { bubbles: true }));
+    target.dispatchEvent(new Event('change', { bubbles: true }));
+    return true;
+  } catch (err) {
+    console.warn('[paper-reader] parent composer fallback failed:', err);
+    return false;
+  }
+}
+
+/** 宿主桥接失败时的统一兜底：先试兼容写入，再退剪贴板，并把真实原因说清楚。 */
+function fallbackChatRoute(payload, reason, detail) {
+  if (injectIntoParentComposer(payload)) {
+    toast('已填入对话输入框（兼容模式）', 'info');
+    return;
+  }
+  void copyText(payload).then((ok) => {
+    const why = detail ? `：${detail}` : reason ? `（${reason}）` : '';
+    toast(ok ? `会话桥接失败，已复制到剪贴板${why}` : `会话桥接失败${why}`, 'error');
+  });
+}
+
+/** 发起「转到对话」：发消息给薄壳，等 ack；超时或失败就走兜底。 */
+function requestChatRoute(payload) {
+  const sent = bridge.toChat(payload, 'draft');
+  if (!sent) {
+    toast('「转到对话」需在 DSH 窗口内使用', 'error');
+    return false;
+  }
+  if (pendingChat) clearTimeout(pendingChat.timer);
+  pendingChat = {
+    payload,
+    timer: setTimeout(() => {
+      const current = pendingChat;
+      pendingChat = null;
+      if (current) fallbackChatRoute(current.payload, 'timeout');
+    }, 2500),
+  };
+  return true;
+}
+
 function handleChatAck(data) {
+  const pending = pendingChat;
+  if (!pending) return; // 已经超时兜底过，或不是本次请求的回执
+  clearTimeout(pending.timer);
+  pendingChat = null;
   if (data?.ok) {
     toast(data.mode === 'send' ? '已发送到对话' : '已填入对话输入框');
     return;
   }
-  const reasons = {
-    'no-session': '当前没有打开的会话，内容已复制到剪贴板',
-    clipboard: '复制到剪贴板失败，请手动复制',
-    'bridge-error': '会话桥接失败，请重试',
-  };
-  toast(reasons[data?.reason] || `转入对话失败${data?.reason ? `（${data.reason}）` : ''}`, 'error');
+  if (data?.reason === 'no-session') {
+    toast('当前没有打开的会话，内容已复制到剪贴板', 'error');
+    return;
+  }
+  fallbackChatRoute(pending.payload, data?.reason, data?.detail);
 }
 
 // ---------- 错误条 / toast / busy ----------

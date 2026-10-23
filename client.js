@@ -360,29 +360,121 @@ window.__ModuleLoader__.load({
       }
     }
 
-    /** 「转到对话」：把 iframe 给的文本填进当前会话输入框。 */
-    async function handleToChat(ctx, data, t, sendToApp) {
-      const payload = typeof data.payload === 'string' ? data.payload : ''
-      const mode = data.mode === 'send' ? 'send' : 'draft'
-      const ack = (ok, reason) => sendToApp({ source: 'pr-host', type: 'chat-ack', ok, mode, reason })
-      if (payload === '') { ack(false, 'empty'); return }
-      try {
-        const sessions = ctx.sessions
-        const current = sessions && sessions.list ? sessions.list.getSnapshot().current : undefined
-        if (!current) { copyText(payload); ack(false, 'no-session'); return }
-        const actx = sessions.scope(current)
-        if (!actx) { copyText(payload); ack(false, 'no-session'); return }
-        const input = ctx.conversation.input.for(actx)
-        input.setDraft(payload)
-        if (mode === 'send') input.submit()
-        ack(true)
-      } catch (error) {
-        copyText(payload)
-        ack(false, 'bridge-failed')
-      }
-    }
+    /**
+ * 「转到对话」：把 iframe 给的文本填进当前会话输入框。
+ *
+ * 走多条路径并记录每一步的真实失败原因（回执里带 detail，阅读器会展示）：
+ *   1. sessions.scope(id) + conversation.input.for(scope).setDraft()  ← 正规预填
+ *   2. conversation.send()                                             ← 直接发送（预填不可用时）
+ *   3. 会话作用域上的 conversation.send()                               ← 同上，换入口
+ *   4. 复制到剪贴板 + 把 detail 回报给阅读器
+ * 服务一律用 ctx.get(name) 取（拿不到时返回 undefined，不会抛），
+ * 这样失败信息是「哪个服务缺失」而不是一句模糊的桥接失败。
+ */
+async function handleToChat(ctx, data, t, sendToApp) {
+  const payload = typeof data.payload === 'string' ? data.payload : ''
+  const mode = data.mode === 'send' ? 'send' : 'draft'
+  const ack = (ok, reason, detail) => sendToApp({ source: 'pr-host', type: 'chat-ack', ok, mode, reason, detail })
+  if (payload === '') { ack(false, 'empty'); return }
 
-    /* ------------------------------------------------------------------ *
+  const steps = []
+  const note = (label, error) => {
+    const text = error && error.message ? error.message : String(error)
+    steps.push(`${label}: ${text}`)
+  }
+  /**
+   * 取服务：作用域 ctx 上必须用属性访问（Service tracker 会把它重新绑定到该会话），
+   * 直接 get() 拿到的是根绑定的实例。所以先属性、后 get()。
+   */
+  const getService = (name, from) => {
+    const holder = from || ctx
+    if (!holder) return undefined
+    try {
+      const value = holder[name]
+      if (value !== undefined) return value
+    } catch (error) {
+      note(`${name}.access`, error)
+    }
+    try {
+      if (typeof holder.get === 'function') {
+        const value = holder.get(name)
+        if (value !== undefined) return value
+      }
+    } catch (error) {
+      note(`${name}.get`, error)
+    }
+    return undefined
+  }
+
+  const sessions = getService('sessions')
+  let current
+  try {
+    current = sessions && sessions.list && sessions.list.getSnapshot
+      ? sessions.list.getSnapshot().current
+      : undefined
+  } catch (error) {
+    note('sessions.list', error)
+  }
+  if (!current) {
+    copyText(payload)
+    ack(false, 'no-session', steps.join(' | '))
+    return
+  }
+
+  let scope
+  try {
+    scope = sessions.scope(current)
+  } catch (error) {
+    note('sessions.scope', error)
+  }
+  if (!scope) {
+    copyText(payload)
+    ack(false, 'no-scope', steps.join(' | '))
+    return
+  }
+
+  const rootConversation = getService('conversation')
+  const scopedConversation = getService('conversation', scope)
+  const prefill = (conversation, label) => {
+    if (!conversation || !conversation.input || typeof conversation.input.for !== 'function') return false
+    try {
+      const input = conversation.input.for(scope)
+      input.setDraft(payload)
+      if (mode === 'send') input.submit()
+      ack(true)
+      return true
+    } catch (error) {
+      note(label, error)
+      return false
+    }
+  }
+
+  // 路径 1：根服务 + 会话作用域参数（文档推荐写法）
+  if (prefill(rootConversation, 'root.input.for/setDraft')) return
+  // 路径 2：会话作用域上的服务（Service tracker 会绑定到该会话）
+  if (scopedConversation !== rootConversation && prefill(scopedConversation, 'scoped.input.for/setDraft')) return
+
+  // 路径 3/4：预填不可用时的兜底 —— 直接发送
+  const senders = [
+    ['scoped.conversation.send', scopedConversation],
+    ['root.conversation.send', rootConversation],
+  ]
+  for (const [label, conversation] of senders) {
+    if (!conversation || typeof conversation.send !== 'function') continue
+    try {
+      await conversation.send(payload)
+      ack(true)
+      return
+    } catch (error) {
+      note(label, error)
+    }
+  }
+
+  copyText(payload)
+  ack(false, 'bridge-failed', steps.join(' | '))
+}
+
+/* ------------------------------------------------------------------ *
      * 组件：输入框工具行里的入口按钮（会话作用域）
      * ------------------------------------------------------------------ */
     function createToolButton(ctx) {
