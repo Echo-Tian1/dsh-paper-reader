@@ -245,6 +245,7 @@ async function main() {
       explain.invalidateHistory();
     },
     sendToChat: (payload) => requestChatRoute(payload),
+    renderDocs: () => { void renderDocsList(); },
     toast,
   });
   } catch (err) {
@@ -305,6 +306,7 @@ async function main() {
     showEmptyState();
   }
 
+  updateDocsTabLabel();
   if (!FIXTURE) probeHealth();
 }
 
@@ -334,6 +336,9 @@ function cacheEls() {
     'toast',
     'busy',
     'busy-text',
+    'tab-docs',
+    'pane-docs',
+    'docs-list',
   ];
   for (const id of ids) {
     els[id.replace(/-([a-z])/g, (_, ch) => ch.toUpperCase())] = document.getElementById(id);
@@ -532,6 +537,8 @@ async function openDoc(docId, { restoreScrollTop = null } = {}) {
 
     state.ui = { ...state.ui, lastDocId: docId };
     persistUi();
+    updateDocsTabLabel();
+    if (els.docsList && els.paneDocs && !els.paneDocs.hidden) void renderDocsList();
   } catch (err) {
     showError(`打开论文失败：${err.message || err}`, { retry: () => openDoc(docId) });
   } finally {
@@ -814,6 +821,87 @@ function togglePane() {
   setCollapsed(!state.paneCollapsed);
 }
 
+// ---------- 论文库（历史 / 术语 旁边的第四个页签） ----------
+
+function h(tag, className, text) {
+  const node = document.createElement(tag);
+  if (className) node.className = className;
+  if (text !== undefined && text !== null) node.textContent = String(text);
+  return node;
+}
+
+/** 页签标题 = 当前论文标题（过长截断），没有论文时显示「论文库」。 */
+function updateDocsTabLabel() {
+  const tab = els.tabDocs;
+  if (!tab) return;
+  const title = (state.structure && state.structure.title) || state.doc?.title || '';
+  if (!title) {
+    tab.textContent = '论文库';
+    tab.title = '论文库（上传的文件都保存在本机）';
+    return;
+  }
+  const short = title.length > 12 ? `${title.slice(0, 12)}…` : title;
+  tab.textContent = short;
+  tab.title = `${title}\n点击查看全部已上传论文`;
+}
+
+/** 画论文库：每篇一行（标题 / 页数 / 解释数 / 最近打开），点击切换。 */
+async function renderDocsList() {
+  const list = els.docsList;
+  if (!list) return;
+  list.innerHTML = '';
+  let docs = state.docs;
+  try {
+    const payload = await state.api.listDocs();
+    if (payload && Array.isArray(payload.docs)) {
+      docs = payload.docs;
+      state.docs = docs;
+    }
+  } catch (err) {
+    // 拿不到就用内存里的列表
+  }
+  if (!docs || docs.length === 0) {
+    list.appendChild(h('div', 'docs-empty', '还没有上传过论文。把 PDF 拖进来就会出现在这里。'));
+    return;
+  }
+  for (const doc of docs) {
+    const row = h('div', 'docs-item');
+    if (state.doc && state.doc.id === doc.id) row.classList.add('docs-current');
+
+    const main = h('button', 'docs-main');
+    main.type = 'button';
+    main.appendChild(h('div', 'docs-title', doc.title || doc.id));
+    const meta = [];
+    if (doc.pageCount) meta.push(`${doc.pageCount} 页`);
+    if (Number.isFinite(doc.explained)) meta.push(`${doc.explained} 条解释`);
+    if (doc.lastOpenedAt) meta.push(`最近打开 ${formatWhen(doc.lastOpenedAt)}`);
+    main.appendChild(h('div', 'docs-meta', meta.join(' · ')));
+    main.addEventListener('click', () => {
+      if (state.doc && state.doc.id === doc.id) return;
+      void openDoc(doc.id);
+    });
+    row.appendChild(main);
+
+    const pdf = h('a', 'btn btn-ghost docs-pdf', 'PDF');
+    pdf.href = `${API_BASE}/api/docs/${encodeURIComponent(doc.id)}/file`;
+    pdf.target = '_blank';
+    pdf.rel = 'noreferrer';
+    pdf.title = '打开原始 PDF（本机保存的原文，不会丢）';
+    row.appendChild(pdf);
+    list.appendChild(row);
+  }
+  const where = state.storeDir ? `${state.storeDir}/docs/` : 'DSH 数据目录的 paper-reader/docs/';
+  const hint = h('div', 'docs-hint', `原始 PDF、页图、结构与解释都在本机：${where}（每篇一个 sha 目录，含 source.pdf）。手动删掉那个目录才会消失。`);
+  list.appendChild(hint);
+}
+
+function formatWhen(iso) {
+  const date = new Date(iso);
+  if (Number.isNaN(date.getTime())) return '—';
+  const pad = (n) => String(n).padStart(2, '0');
+  return `${pad(date.getMonth() + 1)}-${pad(date.getDate())} ${pad(date.getHours())}:${pad(date.getMinutes())}`;
+}
+
 // ---------- 宿主消息 ----------
 
 function handleHostTheme(theme) {
@@ -941,6 +1029,8 @@ async function probeHealth() {
     });
     return;
   }
+  if (typeof health.storeDir === 'string' && health.storeDir) state.storeDir = health.storeDir;
+  if (els.docsList && els.paneDocs && !els.paneDocs.hidden) void renderDocsList();
   if (health.ok && (health.python === false || health.fitz == null)) {
     showError('PDF 抽取不可用：找不到 python3 或 PyMuPDF（import fitz 失败）。安装：python3 -m pip install PyMuPDF', {
       retry: () => location.reload(),

@@ -67,6 +67,7 @@
             <button id="tab-current" class="tab active" type="button" role="tab" aria-selected="true">当前句</button>
             <button id="tab-history" class="tab" type="button" role="tab" aria-selected="false">历史</button>
             <button id="tab-terms" class="tab" type="button" role="tab" aria-selected="false">术语</button>
+            <button id="tab-docs" class="tab tab-doc" type="button" role="tab" aria-selected="false" title="论文库">论文库</button>
           </div>
           <button id="pane-close" class="icon-btn" type="button" aria-label="收起解释栏">×</button>
         </div>
@@ -77,6 +78,13 @@
 
         <div id="pane-history" class="pane-body" hidden>
           <div id="history-list" class="history-list"></div>
+        </div>
+
+        <div id="pane-docs" class="pane-body" hidden>
+          <div class="terms-head">
+            <span class="terms-head-title">论文库（上传的文件都保存在本机）</span>
+          </div>
+          <div id="docs-list" class="docs-list"></div>
         </div>
 
         <div id="pane-terms" class="pane-body" hidden>

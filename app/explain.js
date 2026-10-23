@@ -328,6 +328,9 @@ export function init(options = {}) {
     tabCurrent: document.getElementById('tab-current'),
     tabHistory: document.getElementById('tab-history'),
     tabTerms: document.getElementById('tab-terms'),
+    paneDocs: document.getElementById('pane-docs'),
+    tabDocs: document.getElementById('tab-docs'),
+    docsList: document.getElementById('docs-list'),
     termsList: document.getElementById('terms-list'),
     termsExport: document.getElementById('terms-export'),
   };
@@ -339,6 +342,7 @@ export function init(options = {}) {
       if (!tab) return;
       if (tab.id === 'tab-history') showTab('history');
       else if (tab.id === 'tab-terms') showTab('terms');
+      else if (tab.id === 'tab-docs') showTab('docs');
       else if (tab.id === 'tab-current') showTab('current');
     });
   } else {
@@ -480,24 +484,30 @@ export function invalidateTerms() {
 }
 
 export function showTab(tab, { force = false } = {}) {
-  activeTab = tab === 'history' ? 'history' : tab === 'terms' ? 'terms' : 'current';
+  const known = ['current', 'history', 'terms', 'docs'];
+  activeTab = known.includes(tab) ? tab : 'current';
   const isCurrent = activeTab === 'current';
   const isHistory = activeTab === 'history';
   const isTerms = activeTab === 'terms';
+  const isDocs = activeTab === 'docs';
   dom.paneCurrent.hidden = !isCurrent;
   dom.paneHistory.hidden = !isHistory;
   if (dom.paneTerms) dom.paneTerms.hidden = !isTerms;
+  if (dom.paneDocs) dom.paneDocs.hidden = !isDocs;
   dom.tabCurrent.classList.toggle('active', isCurrent);
   dom.tabHistory.classList.toggle('active', isHistory);
   if (dom.tabTerms) dom.tabTerms.classList.toggle('active', isTerms);
+  if (dom.tabDocs) dom.tabDocs.classList.toggle('active', isDocs);
   dom.tabCurrent.setAttribute('aria-selected', String(isCurrent));
   dom.tabHistory.setAttribute('aria-selected', String(isHistory));
   if (dom.tabTerms) dom.tabTerms.setAttribute('aria-selected', String(isTerms));
+  if (dom.tabDocs) dom.tabDocs.setAttribute('aria-selected', String(isDocs));
   if (isHistory) renderHistory();
   if (isTerms) {
     renderTerms();
     loadTerms(false);
   }
+  if (isDocs && typeof deps.renderDocs === 'function') deps.renderDocs();
   if (force && !isCurrent) {
     // 保持一致的 hidden 状态（force 只用于确保 DOM 状态已更新）
     dom.paneCurrent.hidden = !isCurrent;

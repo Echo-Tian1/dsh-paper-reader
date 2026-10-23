@@ -84,6 +84,10 @@ $DSH_HOME/plugin-data/paper-reader/      # 默认 ~/.dsh/plugin-data/paper-reade
 - 非 CJK 页的单词之间**没有**额外空格元素，客户端自己补空格。
 - `p1` 是 `structure.paras[].id`，用于选区反查段落。
 
+### `GET /api/docs/<id>/file`
+返回上传时保存的**原始 PDF**（`application/pdf`，`content-disposition: inline; filename*=UTF-8''<标题>.pdf`）。
+文件在 `docs/<id>/source.pdf`，不重新生成；`<id>` 无对应目录时 404。
+
 ### `GET /media/<id>/page-<n>.png`
 `image/png`，1.5x 渲染（918×1188 量级）。带 `cache-control: max-age=3600`。
 

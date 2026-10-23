@@ -1095,3 +1095,84 @@ body.region-dragging .text-layer span {
   padding: 26px 12px;
   text-align: center;
 }
+
+/* ---------- 论文库页签 / 列表 ---------- */
+.tab-doc {
+  max-width: 9.5em;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.docs-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 8px 10px 16px;
+  overflow: auto;
+}
+
+.docs-item {
+  display: flex;
+  align-items: stretch;
+  gap: 6px;
+  border: 1px solid var(--pr-border);
+  border-radius: 10px;
+  background: var(--pr-bg);
+  overflow: hidden;
+}
+
+.docs-item.docs-current {
+  border-color: color-mix(in srgb, var(--pr-brand) 55%, var(--pr-border));
+  background: color-mix(in srgb, var(--pr-brand) 6%, var(--pr-bg));
+}
+
+.docs-main {
+  flex: 1;
+  min-width: 0;
+  border: 0;
+  background: transparent;
+  text-align: left;
+  padding: 9px 10px;
+  cursor: pointer;
+  color: var(--pr-fg);
+  font: inherit;
+}
+
+.docs-main:hover { background: var(--pr-soft); }
+
+.docs-title {
+  font-size: 12.5px;
+  line-height: 1.35;
+  font-weight: 600;
+  overflow: hidden;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+}
+
+.docs-meta {
+  margin-top: 3px;
+  font-size: 11px;
+  color: var(--pr-muted);
+}
+
+.docs-pdf {
+  align-self: center;
+  margin-right: 8px;
+  text-decoration: none;
+  white-space: nowrap;
+}
+
+.docs-empty {
+  color: var(--pr-muted);
+  font-size: 12px;
+  padding: 14px 6px;
+}
+
+.docs-hint {
+  margin-top: 8px;
+  color: var(--pr-muted);
+  font-size: 11px;
+  line-height: 1.5;
+}

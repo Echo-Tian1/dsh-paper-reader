@@ -218,6 +218,36 @@ export function createApp({ ctx, config = {}, env = process.env }) {
     respondJson(res, 200, page)
   }
 
+  /**
+   * 原始 PDF：论文上传时就已经完整保存在 docs/<id>/source.pdf，这里按标题下载/预览。
+   * 这是「所有上传的文件都留着」的读取入口——不重新生成、不丢原文件。
+   */
+  async function handleOriginalFile(req, res, id) {
+    if (!isDocId(id)) throw new PaperError('bad-request', '文档 id 非法', 400)
+    const paths = docPaths(id, env)
+    let buffer
+    try {
+      buffer = await fsp.readFile(paths.source)
+    } catch {
+      throw new PaperError('not-found', '找不到这篇论文的原始 PDF（可能已被手动删除）', 404)
+    }
+    let title = id
+    try {
+      const structure = await readStructure(id, env)
+      if (structure && typeof structure.title === 'string' && structure.title.trim()) title = structure.title.trim()
+    } catch (error) {
+      // 标题拿不到就用 id，不影响下载
+    }
+    const safe = title.replace(/[\\/:*?"<>|\r\n]+/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 80) || id
+    res.writeHead(200, {
+      'content-type': 'application/pdf',
+      'content-length': buffer.length,
+      'cache-control': 'max-age=3600',
+      'content-disposition': `inline; filename*=UTF-8''${encodeURIComponent(safe)}.pdf`,
+    })
+    res.end(buffer)
+  }
+
   async function handleExplanations(req, res, id) {
     const structure = await readStructure(id, env)
     if (!structure) throw new PaperError('not-found', `找不到文档：${id}`, 404)
@@ -390,6 +420,11 @@ export function createApp({ ctx, config = {}, env = process.env }) {
     if (page) {
       if (method !== 'GET') return methodNotAllowed(res, method)
       return handlePage(req, res, page[1], Number(page[2]))
+    }
+    const originalPdf = /^\/api\/docs\/([0-9a-f]{16})\/file$/.exec(pathname)
+    if (originalPdf) {
+      if (method !== 'GET') return methodNotAllowed(res, method)
+      return handleOriginalFile(req, res, originalPdf[1])
     }
     const explanations = /^\/api\/docs\/([0-9a-f]{16})\/explanations$/.exec(pathname)
     if (explanations) {
