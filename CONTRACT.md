@@ -44,7 +44,7 @@ $DSH_HOME/plugin-data/paper-reader/      # 默认 ~/.dsh/plugin-data/paper-reade
 两种请求体，二选一：
 
 - `Content-Type: application/pdf`，body = PDF 字节（上限 `config.maxUploadMB`）。
-- `Content-Type: application/json`，body = `{"path":"/Users/echo/Downloads/x.pdf"}`（只接受绝对路径、`.pdf`、存在于本机）。
+- `Content-Type: application/json`，body = `{"path":"/path/to/x.pdf"}`（只接受绝对路径、`.pdf`、存在于本机）。
 
 成功 200：
 ```json

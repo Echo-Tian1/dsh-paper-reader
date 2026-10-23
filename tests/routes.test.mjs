@@ -6,15 +6,23 @@
  */
 import { describe, it, before, after } from 'node:test'
 import assert from 'node:assert/strict'
+import { existsSync } from 'node:fs'
 import { mkdtemp, mkdir, readFile, rm, writeFile } from 'node:fs/promises'
 import { Readable } from 'node:stream'
 import os from 'node:os'
 import path from 'node:path'
+import { fileURLToPath } from 'node:url'
 
 import { apply, createApp } from '../index.js'
 import { appendExplanation, sha256 } from '../store.js'
 
-const FIXTURE = '/Users/echo/Downloads/1706.03762v7.pdf'
+const HERE = path.dirname(fileURLToPath(import.meta.url))
+
+// 夹具 PDF（arXiv:1706.03762v7）不随仓库分发：放到 tests/fixtures/ 或用 PR_FIXTURE 指定；
+// 没有夹具时，依赖真实论文的用例自动 skip，其余用例照常跑。
+const FIXTURE = process.env.PR_FIXTURE || path.join(HERE, 'fixtures', '1706.03762v7.pdf')
+const HAS_FIXTURE = existsSync(FIXTURE)
+const SKIP_NO_FIXTURE = HAS_FIXTURE ? {} : { skip: '缺少夹具 PDF：把 1706.03762v7.pdf 放到 tests/fixtures/ 或设置 PR_FIXTURE' }
 const EXPLAIN_BODY = '### 1. 中译\n这是译文。\n### 2. 难点\n- 术语：attention\n### 3. 在论证中的位置\n承上启下。'
 const EXPLAIN_ANSWER = `${EXPLAIN_BODY}\n<!--terms:{"terms":[{"term":"attention","zh":"注意力","note":"按相关性加权求和的机制"}]}-->`
 const TRANSLATE_ANSWER = '我们提出 Transformer，一种完全基于注意力机制的模型架构，彻底摒弃了循环与卷积。'
@@ -140,7 +148,7 @@ async function call(app, init) {
   return res
 }
 
-describe('宿主路由（真实抽取 + 假 llm）', () => {
+describe('宿主路由（真实抽取 + 假 llm）', SKIP_NO_FIXTURE, () => {
   let home
   let env
   let staticDir

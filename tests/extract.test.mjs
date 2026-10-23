@@ -1,7 +1,7 @@
 /**
  * extract.py 的契约测试。
  *
- * 夹具：/Users/echo/Downloads/1706.03762v7.pdf（15 页、22 条 TOC、6095 词）。
+ * 夹具：<fixture>/1706.03762v7.pdf（15 页、22 条 TOC、6095 词）。
  * 另外用 PyMuPDF 现场生成三份小 PDF，覆盖加密、无文字层、双栏三种边界。
  *
  * 这些测试只依赖系统 python3 + PyMuPDF，不 import 任何 npm 依赖。
@@ -17,7 +17,11 @@ import { fileURLToPath } from 'node:url'
 
 const HERE = path.dirname(fileURLToPath(import.meta.url))
 const EXTRACT = path.join(HERE, '..', 'extract.py')
-const FIXTURE = '/Users/echo/Downloads/1706.03762v7.pdf'
+// 夹具 PDF（arXiv:1706.03762v7）不随仓库分发：放到 tests/fixtures/ 或用 PR_FIXTURE 指定；
+// 没有夹具时，依赖真实论文的用例自动 skip，其余用例照常跑。
+const FIXTURE = process.env.PR_FIXTURE || path.join(HERE, 'fixtures', '1706.03762v7.pdf')
+const HAS_FIXTURE = existsSync(FIXTURE)
+const SKIP_NO_FIXTURE = HAS_FIXTURE ? {} : { skip: '缺少夹具 PDF：把 1706.03762v7.pdf 放到 tests/fixtures/ 或设置 PR_FIXTURE' }
 
 function runExtract(pdfPath, outDir) {
   const started = Date.now()
@@ -44,7 +48,7 @@ async function python(code, workDir) {
 
 const sleep = ms => new Promise(resolve => setTimeout(resolve, ms))
 
-describe('extract.py 真实论文（1706.03762v7.pdf）', () => {
+describe('extract.py 真实论文（1706.03762v7.pdf）', SKIP_NO_FIXTURE, () => {
   let outDir
   let run
   let summary
