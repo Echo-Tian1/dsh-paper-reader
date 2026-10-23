@@ -1,0 +1,43 @@
+{
+ "version": 1,
+ "entries": [
+  {
+   "id": "e_fixture01",
+   "key": "k111111111111111111111111111111111111111111111111111111111111111",
+   "recipe": "v1",
+   "selText": "Attention mechanisms have become an integral part of compelling sequence modeling and transduction models in various tasks.",
+   "normText": "Attention mechanisms have become an integral part of compelling sequence modeling and transduction models in various tasks.",
+   "docId": "demo",
+   "page": 1,
+   "paraId": "p1",
+   "sectionId": "s1",
+   "contextHash": "k222222222222222222222222222222222222222222222222222222222222222",
+   "provider": "fixture",
+   "model": "fixture-mock",
+   "answer": "### 1. 中译\n注意力机制已经成为各种任务中引人注目的序列建模与转导模型不可或缺的一部分。\n\n### 2. 难点\n- **transduction models**：转导模型，指从输入序列直接产生输出序列的模型（如机器翻译）。\n- **integral part**：不可或缺的组成部分；此处不是数学意义上的“积分”。\n- 句法：`have become an integral part of ...` 为现在完成时，强调持续至今的地位。\n\n### 3. 在论证中的位置\n本句位于 Introduction 开头，先把注意力机制的重要性立住，为后文提出完全基于注意力的 Transformer 做铺垫。下一句会直接引出本文的模型。",
+   "createdAt": "2026-10-22T07:30:00.000Z",
+   "hitCount": 2,
+   "lastHitAt": "2026-10-22T08:10:00.000Z",
+   "supersedes": null
+  },
+  {
+   "id": "e_fixture02",
+   "key": "k333333333333333333333333333333333333333333333333333333333333333",
+   "recipe": "v1",
+   "selText": "The encoder is composed of a stack of six identical layers, each with two sub-layers.",
+   "normText": "The encoder is composed of a stack of six identical layers, each with two sub-layers.",
+   "docId": "demo",
+   "page": 2,
+   "paraId": "p5",
+   "sectionId": "s3",
+   "contextHash": "k444444444444444444444444444444444444444444444444444444444444444",
+   "provider": "fixture",
+   "model": "fixture-mock",
+   "answer": "### 1. 中译\n编码器由六个相同层堆叠而成，每一层包含两个子层。\n\n### 2. 难点\n- **stack of six identical layers**：六个相同层组成的堆叠；`identical` 指结构相同而非参数共享。\n- **sub-layer**：子层（多头注意力、前馈网络各算一个）。\n- 句法：`composed of` 为过去分词短语作后置定语。\n\n### 3. 在论证中的位置\n本句开始描述编码器/解码器栈的具体结构，是 2.1 节的核心定义句，后续对每个子层逐一展开。",
+   "createdAt": "2026-10-22T07:50:00.000Z",
+   "hitCount": 0,
+   "lastHitAt": null,
+   "supersedes": null
+  }
+ ]
+}

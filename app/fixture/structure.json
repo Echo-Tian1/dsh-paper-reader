@@ -1,0 +1,191 @@
+{
+ "version": 1,
+ "id": "demo",
+ "title": "Demo Paper — Attention Is All You Need（fixture）",
+ "pageCount": 3,
+ "pages": [
+  {
+   "n": 1,
+   "w": 612,
+   "h": 792,
+   "hasText": true
+  },
+  {
+   "n": 2,
+   "w": 612,
+   "h": 792,
+   "hasText": true
+  },
+  {
+   "n": 3,
+   "w": 612,
+   "h": 792,
+   "hasText": false
+  }
+ ],
+ "sections": [
+  {
+   "id": "s1",
+   "title": "1 Introduction",
+   "level": 1,
+   "page": 1,
+   "paraIds": [
+    "p1",
+    "p2"
+   ]
+  },
+  {
+   "id": "s2",
+   "title": "2 Model Architecture",
+   "level": 1,
+   "page": 1,
+   "paraIds": [
+    "p3",
+    "p4"
+   ]
+  },
+  {
+   "id": "s3",
+   "title": "2.1 Encoder and Decoder Stacks",
+   "level": 2,
+   "page": 2,
+   "paraIds": [
+    "p5",
+    "p6",
+    "p7"
+   ]
+  }
+ ],
+ "paras": [
+  {
+   "id": "p1",
+   "page": 1,
+   "sectionId": "s1",
+   "bbox": [
+    54,
+    72,
+    289.7,
+    138.0
+   ],
+   "text": "Attention mechanisms have become an integral part of compelling sequence modeling and transduction models in various tasks. In this work we propose the Transformer based solely on attention mechanisms.",
+   "sent": [
+    [
+     0,
+     123
+    ],
+    [
+     123,
+     201
+    ]
+   ]
+  },
+  {
+   "id": "p2",
+   "page": 1,
+   "sectionId": "s1",
+   "bbox": [
+    54,
+    300,
+    285.75,
+    352.0
+   ],
+   "text": "The Transformer follows this overall architecture using stacked self-attention and point-wise, fully connected layers for both the encoder and decoder.",
+   "sent": [
+    [
+     0,
+     151
+    ]
+   ]
+  },
+  {
+   "id": "p3",
+   "page": 1,
+   "sectionId": "s2",
+   "bbox": [
+    322,
+    72,
+    552.35,
+    110.0
+   ],
+   "text": "We employ a residual connection around each of the two sub-layers, followed by layer normalization.",
+   "sent": [
+    [
+     0,
+     99
+    ]
+   ]
+  },
+  {
+   "id": "p4",
+   "page": 1,
+   "sectionId": "s2",
+   "bbox": [
+    322,
+    300,
+    539.95,
+    352.0
+   ],
+   "text": "Experiments show that these models are superior in quality while being more parallelizable and requiring significantly less time to train.",
+   "sent": [
+    [
+     0,
+     138
+    ]
+   ]
+  },
+  {
+   "id": "p5",
+   "page": 2,
+   "sectionId": "s3",
+   "bbox": [
+    54,
+    72,
+    477.25,
+    82.0
+   ],
+   "text": "The encoder is composed of a stack of six identical layers, each with two sub-layers.",
+   "sent": [
+    [
+     0,
+     85
+    ]
+   ]
+  },
+  {
+   "id": "p6",
+   "page": 2,
+   "sectionId": "s3",
+   "bbox": [
+    54,
+    200,
+    547.65,
+    210.0
+   ],
+   "text": "The decoder is also composed of a stack of six identical layers with an additional third sub-layer.",
+   "sent": [
+    [
+     0,
+     99
+    ]
+   ]
+  },
+  {
+   "id": "p7",
+   "page": 2,
+   "sectionId": "s3",
+   "bbox": [
+    54,
+    300,
+    384.6,
+    310.0
+   ],
+   "text": "This error sentence exists only to trigger the fixture retry path.",
+   "sent": [
+    [
+     0,
+     66
+    ]
+   ]
+  }
+ ]
+}

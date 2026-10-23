@@ -1,0 +1,36 @@
+{
+  "name": "@local/paper-reader",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "文献阅读坞：左侧读论文、选中句子在坞内解释，带上下文、按句缓存、按论文留历史",
+  "exports": {
+    ".": "./index.js",
+    "./client": "./client.js",
+    "./locale/*.json": "./locale/*.json",
+    "./icon": "./icon.svg"
+  },
+  "files": [
+    "index.js",
+    "client.js",
+    "ingest.js",
+    "store.js",
+    "explain.js",
+    "extract.py",
+    "app",
+    "cordis.patch.yml",
+    "locale/*.json",
+    "icon.svg",
+    "CONTRACT.md"
+  ],
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "platform": "web",
+      "immediately": true,
+      "inject": []
+    }
+  }
+}

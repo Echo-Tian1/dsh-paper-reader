@@ -1,0 +1,721 @@
+/**
+ * app.js — 阅读器页面启动与编排：API 客户端、顶栏、上传、空状态、窄态、ui-state、主题桥。
+ *
+ * 接口一律以 CONTRACT.md 为准；所有请求经 state.api，便于 ?fixture=1 时换成 fixture mock。
+ */
+
+import * as bridge from './bridge.js';
+import * as paper from './paper.js';
+import * as explain from './explain.js';
+
+const params = new URLSearchParams(location.search);
+const FIXTURE = params.get('fixture') === '1';
+
+// 宿主把全部路由注册在 prefix /dsh-paper-reader 下（CONTRACT.md §2 的路径都是相对前缀的简写）。
+// 正式模式下所有 HTTP 请求（含页图 <img>）都必须带上这个前缀。
+const API_BASE = '/dsh-paper-reader';
+
+const els = {};
+let appEl = null;
+let uiTimer = null;
+let toastTimer = null;
+let errorRetry = null;
+let dragDepth = 0;
+
+const state = {
+  api: null,
+  fixture: FIXTURE,
+  docs: [],
+  doc: null,
+  structure: null,
+  ui: { lastDocId: null, perDoc: {} },
+  sel: null,
+  currentPage: 1,
+  narrow: false,
+  paneOpen: false,
+  paneCollapsed: false,
+};
+
+// ---------- HTTP 客户端（正式模式） ----------
+
+async function parseResponse(res) {
+  const text = await res.text();
+  let data = null;
+  try {
+    data = text ? JSON.parse(text) : null;
+  } catch (err) {
+    data = null;
+  }
+  if (!res.ok) {
+    const error = new Error(data?.error?.message || `请求失败（HTTP ${res.status}）`);
+    error.code = data?.error?.code;
+    error.status = res.status;
+    throw error;
+  }
+  if (data == null) throw new Error('接口返回了无法解析的内容');
+  return data;
+}
+
+const httpApi = {
+  fixture: false,
+
+  async health() {
+    try {
+      return await parseResponse(await fetch(`${API_BASE}/api/health`, { cache: 'no-store' }));
+    } catch (err) {
+      return null;
+    }
+  },
+
+  async listDocs() {
+    return parseResponse(await fetch(`${API_BASE}/api/docs`, { cache: 'no-store' }));
+  },
+
+  async upload(file) {
+    return parseResponse(
+      await fetch(`${API_BASE}/api/docs`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/pdf' },
+        body: file,
+      })
+    );
+  },
+
+  pageImageUrl(docId, n) {
+    return `${API_BASE}/media/${encodeURIComponent(docId)}/page-${n}.png`;
+  },
+
+  async getStructure(docId) {
+    return parseResponse(await fetch(`${API_BASE}/api/docs/${encodeURIComponent(docId)}/structure`, { cache: 'no-store' }));
+  },
+
+  async getPage(docId, n) {
+    return parseResponse(
+      await fetch(`${API_BASE}/api/docs/${encodeURIComponent(docId)}/pages/${n}`, { cache: 'no-store' })
+    );
+  },
+
+  async getIndex(docId) {
+    return parseResponse(
+      await fetch(`${API_BASE}/api/docs/${encodeURIComponent(docId)}/explanations?index=1`, { cache: 'no-store' })
+    );
+  },
+
+  async getExplanations(docId) {
+    return parseResponse(
+      await fetch(`${API_BASE}/api/docs/${encodeURIComponent(docId)}/explanations`, { cache: 'no-store' })
+    );
+  },
+
+  explainStream(body, signal) {
+    return fetch(`${API_BASE}/api/explain`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', accept: 'text/event-stream' },
+      body: JSON.stringify(body),
+      signal,
+    });
+  },
+
+  async postUiState(uiState) {
+    try {
+      return await parseResponse(
+        await fetch(`${API_BASE}/api/ui-state`, {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify(uiState),
+        })
+      );
+    } catch (err) {
+      return null;
+    }
+  },
+
+  async getUiState() {
+    try {
+      return await parseResponse(await fetch(`${API_BASE}/api/ui-state`, { cache: 'no-store' }));
+    } catch (err) {
+      return null;
+    }
+  },
+};
+
+// ---------- 启动 ----------
+
+async function main() {
+  cacheEls();
+  wireEvents();
+  updateNarrow();
+
+  bridge.initBridge({ onTheme: handleHostTheme, onChatAck: handleChatAck });
+  bridge.postReady();
+  bridge.notifyHeight(true);
+
+  if (FIXTURE) {
+    const module = await import('./fixture/mock.js');
+    state.api = module.createApi();
+  } else {
+    state.api = httpApi;
+  }
+
+  explain.init({
+    api: state.api,
+    embedded: bridge.embedded,
+    getDocMeta: () => ({ title: state.structure?.title || state.doc?.title || '' }),
+    getParaContext: paper.getParaContext,
+    onJump: (page, paraId) => {
+      paper.scrollToPage(page);
+      paper.flashPara(paraId);
+    },
+    onEntrySaved: (entry) => {
+      paper.addExplanation(entry);
+      explain.invalidateHistory();
+    },
+    sendToChat: (payload) => bridge.toChat(payload, 'draft'),
+    toast,
+  });
+
+  paper.init({
+    api: state.api,
+    scrollEl: els.paperScroll,
+    contentEl: els.paperContent,
+    onSelectionChange: handleSelectionChange,
+    onExplainSelection: (info) => runExplain(info),
+    onOpenEntry: async (entry) => {
+      // 原文标记来自 ?index=1 精简索引（没有 answer），点开时补全为完整条目
+      let full = entry;
+      if (!full?.answer && state.doc) {
+        try {
+          const data = await state.api.getExplanations(state.doc.id);
+          full = (data?.entries || []).find((item) => item.id === entry.id) || entry;
+        } catch (err) {
+          full = entry;
+        }
+      }
+      explain.openEntry(full);
+      if (state.narrow) openPane();
+      else setCollapsed(false);
+    },
+    onPageChange: handlePageChange,
+    toast,
+  });
+
+  explain.setEmbedded(bridge.embedded);
+
+  await refreshDocs();
+
+  // /api/docs 只带 lastDocId；每篇上次页码 / scrollTop 在 /api/ui-state
+  try {
+    const uiState = await state.api.getUiState();
+    if (uiState && typeof uiState === 'object') {
+      state.ui = { ...state.ui, ...uiState };
+      if (uiState.perDoc && typeof uiState.perDoc === 'object') {
+        state.ui.perDoc = { ...(state.ui.perDoc || {}), ...uiState.perDoc };
+      }
+    }
+  } catch (err) {
+    /* 拿不到 ui-state 就退回 lastPage */
+  }
+
+  const wanted = params.get('doc') || state.ui.lastDocId;
+  const doc = state.docs.find((d) => d.id === wanted) || state.docs[0] || null;
+  if (doc) {
+    await openDoc(doc.id);
+  } else {
+    showEmptyState();
+  }
+
+  if (!FIXTURE) probeHealth();
+}
+
+function cacheEls() {
+  appEl = document.getElementById('app');
+  const ids = [
+    'paper-scroll',
+    'paper-content',
+    'empty-state',
+    'recent-list',
+    'recent-empty',
+    'empty-upload',
+    'doc-title',
+    'page-indicator',
+    'docs-select',
+    'upload-btn',
+    'file-input',
+    'errorbar',
+    'error-text',
+    'error-retry',
+    'error-close',
+    'pane-toggle',
+    'pane-close',
+    'drawer-backdrop',
+    'selection-toolbar',
+    'toast',
+    'busy',
+    'busy-text',
+  ];
+  for (const id of ids) {
+    els[id.replace(/-([a-z])/g, (_, ch) => ch.toUpperCase())] = document.getElementById(id);
+  }
+}
+
+// ---------- 事件接线 ----------
+
+function wireEvents() {
+  els.uploadBtn.addEventListener('click', () => els.fileInput.click());
+  els.emptyUpload.addEventListener('click', () => els.fileInput.click());
+  els.fileInput.addEventListener('change', () => {
+    const file = els.fileInput.files?.[0];
+    els.fileInput.value = '';
+    if (file) uploadFile(file);
+  });
+
+  els.docsSelect.addEventListener('change', () => {
+    const id = els.docsSelect.value;
+    if (id && id !== state.doc?.id) openDoc(id);
+  });
+
+  els.errorClose.addEventListener('click', hideError);
+  els.errorRetry.addEventListener('click', () => {
+    const retry = errorRetry;
+    hideError();
+    if (retry) retry();
+  });
+
+  els.paneToggle.addEventListener('click', togglePane);
+  els.paneClose.addEventListener('click', () => {
+    if (state.narrow) closePane();
+    else setCollapsed(true);
+  });
+  els.drawerBackdrop.addEventListener('click', closePane);
+
+  const toolbar = els.selectionToolbar;
+  toolbar.addEventListener('mousedown', (event) => event.preventDefault()); // 保住选区
+  toolbar.addEventListener('click', (event) => {
+    const action = event.target.closest('[data-act]')?.dataset.act;
+    if (!action) return;
+    if (action === 'explain') {
+      const info = state.sel;
+      hideToolbar();
+      if (info) runExplain(info);
+    } else if (action === 'copy') {
+      const info = state.sel;
+      hideToolbar();
+      if (info) copyText(info.text);
+    } else {
+      hideToolbar();
+      paper.clearSelection();
+    }
+  });
+
+  els.paperScroll.addEventListener('scroll', hideToolbar, { passive: true });
+
+  document.addEventListener('dragenter', onDragEnter);
+  document.addEventListener('dragover', onDragOver);
+  document.addEventListener('dragleave', onDragLeave);
+  document.addEventListener('drop', onDrop);
+
+  window.addEventListener('resize', updateNarrow);
+  document.addEventListener('keydown', (event) => {
+    if (event.key === 'Escape') {
+      hideToolbar();
+      if (state.narrow && state.paneOpen) closePane();
+    }
+  });
+}
+
+// ---------- 文档列表 / 打开 ----------
+
+async function refreshDocs() {
+  try {
+    const data = await state.api.listDocs();
+    state.docs = Array.isArray(data?.docs) ? data.docs : [];
+    state.ui = data?.ui || { lastDocId: null, perDoc: {} };
+    renderDocsSelect();
+    renderRecent();
+  } catch (err) {
+    if (!FIXTURE) {
+      showError(`无法连接插件服务：${err.message || err}`, { retry: () => location.reload() });
+    } else {
+      showError(`fixture 加载失败：${err.message || err}`);
+    }
+  }
+}
+
+function renderDocsSelect() {
+  const select = els.docsSelect;
+  select.innerHTML = '';
+  if (!state.docs.length) {
+    select.hidden = true;
+    return;
+  }
+  select.hidden = false;
+  for (const doc of state.docs) {
+    const option = document.createElement('option');
+    option.value = doc.id;
+    option.textContent = `${doc.title || '未命名论文'}${doc.pageCount ? ` · ${doc.pageCount} 页` : ''}`;
+    select.appendChild(option);
+  }
+  select.value = state.doc?.id || state.ui.lastDocId || '';
+}
+
+function renderRecent() {
+  const list = els.recentList;
+  list.innerHTML = '';
+  const docs = [...state.docs].sort((a, b) =>
+    String(b.lastOpenedAt || b.addedAt || '').localeCompare(String(a.lastOpenedAt || a.addedAt || ''))
+  );
+  els.recentEmpty.hidden = docs.length > 0;
+  for (const doc of docs) {
+    const item = document.createElement('button');
+    item.type = 'button';
+    item.className = 'recent-item';
+    const title = document.createElement('span');
+    title.className = 'recent-item-title';
+    title.textContent = doc.title || '未命名论文';
+    const meta = document.createElement('span');
+    meta.className = 'recent-item-meta';
+    meta.textContent = [doc.pageCount ? `${doc.pageCount} 页` : '', doc.explained ? `已解释 ${doc.explained}` : '']
+      .filter(Boolean)
+      .join(' · ');
+    item.append(title, meta);
+    item.addEventListener('click', () => openDoc(doc.id));
+    list.appendChild(item);
+  }
+}
+
+function showEmptyState() {
+  els.emptyState.hidden = false;
+  els.docTitle.textContent = '未打开论文';
+  els.pageIndicator.hidden = true;
+  els.docsSelect.hidden = state.docs.length === 0;
+  state.doc = null;
+  state.structure = null;
+  renderRecent();
+}
+
+function hideEmptyState() {
+  els.emptyState.hidden = true;
+}
+
+async function openDoc(docId, { restoreScrollTop = null } = {}) {
+  if (!docId || !state.api) return;
+  hideToolbar();
+  setBusy(true, '正在打开论文…');
+  try {
+    const structure = await state.api.getStructure(docId);
+    const doc =
+      state.docs.find((d) => d.id === docId) || {
+        id: docId,
+        title: structure.title,
+        pageCount: structure.pageCount,
+        lastPage: 1,
+      };
+    state.doc = doc;
+    state.structure = structure;
+    hideEmptyState();
+
+    els.docTitle.textContent = structure.title || doc.title || '未命名论文';
+    els.pageIndicator.hidden = false;
+    els.pageIndicator.textContent = `1 / ${structure.pageCount || structure.pages?.length || 1}`;
+
+    renderDocsSelect();
+
+    const persisted = state.ui.perDoc?.[docId] || {};
+    const scrollTop = restoreScrollTop != null ? restoreScrollTop : persisted.scrollTop || 0;
+    await paper.load({
+      docId,
+      structure,
+      restore: { lastPage: doc.lastPage || persisted.lastPage || 1, scrollTop },
+    });
+
+    explain.reset(docId, structure);
+    explain.setEmbedded(bridge.embedded);
+    state.currentPage = paper.getCurrentPage();
+    updatePageIndicator();
+
+    let indexPayload = null;
+    try {
+      indexPayload = await state.api.getIndex(docId);
+    } catch (err) {
+      indexPayload = null;
+    }
+    paper.setExplanations(indexPayload || []);
+
+    state.ui = { ...state.ui, lastDocId: docId };
+    persistUi();
+    closePane();
+  } catch (err) {
+    showError(`打开论文失败：${err.message || err}`, { retry: () => openDoc(docId) });
+  } finally {
+    setBusy(false);
+  }
+}
+
+function handlePageChange(n) {
+  state.currentPage = n;
+  updatePageIndicator();
+  schedulePersist();
+  hideToolbar();
+}
+
+function updatePageIndicator() {
+  const total = state.structure?.pageCount || paper.getPageCount() || 1;
+  els.pageIndicator.textContent = `${paper.getCurrentPage() || state.currentPage} / ${total}`;
+}
+
+// ---------- ui-state 持久化 ----------
+
+function schedulePersist() {
+  clearTimeout(uiTimer);
+  uiTimer = setTimeout(() => persistUi(), 500);
+}
+
+async function persistUi() {
+  clearTimeout(uiTimer);
+  uiTimer = null;
+  if (!state.api || !state.doc) return;
+  const perDoc = { ...(state.ui.perDoc || {}) };
+  perDoc[state.doc.id] = {
+    lastPage: paper.getCurrentPage() || 1,
+    scrollTop: paper.getScrollTop() || 0,
+  };
+  state.ui = { ...state.ui, lastDocId: state.doc.id, perDoc };
+  await state.api.postUiState({ lastDocId: state.doc.id, perDoc });
+}
+
+// ---------- 上传 ----------
+
+function hasFiles(event) {
+  const types = event.dataTransfer?.types;
+  if (!types) return false;
+  return Array.from(types).includes('Files');
+}
+
+function onDragEnter(event) {
+  if (!hasFiles(event)) return;
+  event.preventDefault();
+  dragDepth += 1;
+  showDrop(true);
+}
+
+function onDragOver(event) {
+  if (!hasFiles(event)) return;
+  event.preventDefault();
+  if (event.dataTransfer) event.dataTransfer.dropEffect = 'copy';
+}
+
+function onDragLeave(event) {
+  if (!hasFiles(event)) return;
+  dragDepth = Math.max(0, dragDepth - 1);
+  if (dragDepth === 0) showDrop(false);
+}
+
+function onDrop(event) {
+  if (!hasFiles(event)) return;
+  event.preventDefault();
+  dragDepth = 0;
+  showDrop(false);
+  const file = event.dataTransfer?.files?.[0];
+  if (file) uploadFile(file);
+}
+
+function showDrop(visible) {
+  const overlay = document.getElementById('drop-overlay');
+  if (overlay) overlay.hidden = !visible;
+}
+
+async function uploadFile(file) {
+  if (!file) return;
+  const isPdf = /\.pdf$/i.test(file.name || '') || file.type === 'application/pdf';
+  if (!isPdf) {
+    showError('只能打开 PDF 文件。');
+    return;
+  }
+  hideError();
+  setBusy(true, '正在上传并抽取文字层…');
+  try {
+    const res = await state.api.upload(file);
+    if (!res || res.ok === false) {
+      const error = new Error(res?.error?.message || '上传失败');
+      error.code = res?.error?.code;
+      throw error;
+    }
+    toast(res.reused ? '这篇论文已在列表中，直接打开' : `已导入：${res.doc?.title || file.name}`);
+    await refreshDocs();
+    await openDoc(res.doc?.id);
+  } catch (err) {
+    showError(`打开 PDF 失败：${err.message || err}`, { retry: () => uploadFile(file) });
+  } finally {
+    setBusy(false);
+  }
+}
+
+// ---------- 选区工具条 ----------
+
+function handleSelectionChange(info) {
+  state.sel = info;
+  if (!info || !info.text) {
+    hideToolbar();
+    return;
+  }
+  showToolbar(info.rect);
+}
+
+function showToolbar(rect) {
+  const bar = els.selectionToolbar;
+  bar.hidden = false;
+  const barWidth = bar.offsetWidth || 150;
+  const barHeight = bar.offsetHeight || 30;
+  let left = (rect?.left || 0) + (rect?.width || 0) / 2;
+  left = Math.min(Math.max(left, barWidth / 2 + 8), window.innerWidth - barWidth / 2 - 8);
+  let top = (rect?.top || 0) - barHeight - 8;
+  if (top < 56) top = (rect?.bottom || 0) + 8;
+  top = Math.min(Math.max(top, 8), window.innerHeight - barHeight - 8);
+  bar.style.left = `${Math.round(left)}px`;
+  bar.style.top = `${Math.round(top)}px`;
+}
+
+function hideToolbar() {
+  if (els.selectionToolbar) els.selectionToolbar.hidden = true;
+}
+
+function runExplain(info) {
+  if (!info || !info.text || !state.doc) return;
+  hideToolbar();
+  explain.explainSelection({ page: info.page, paraId: info.paraId, text: info.text });
+  if (state.narrow) openPane();
+  else setCollapsed(false);
+}
+
+async function copyText(text) {
+  const ok = await explain.copyText(text);
+  toast(ok ? '已复制选句' : '复制失败，请手动复制', ok ? 'info' : 'error');
+}
+
+// ---------- 窄态抽屉 ----------
+
+function updateNarrow() {
+  const narrow = window.innerWidth < 980;
+  state.narrow = narrow;
+  appEl.classList.toggle('narrow', narrow);
+  if (narrow) setCollapsed(false);
+  if (!narrow) closePane();
+  syncPaneButtons();
+  updatePageIndicator();
+}
+
+/** 宽态下收起/展开解释栏（窄态用覆盖抽屉）。 */
+function setCollapsed(collapsed) {
+  state.paneCollapsed = !!collapsed;
+  appEl.classList.toggle('pane-collapsed', state.paneCollapsed);
+  syncPaneButtons();
+}
+
+function syncPaneButtons() {
+  if (els.paneToggle) {
+    els.paneToggle.hidden = !(state.narrow || state.paneCollapsed);
+    els.paneToggle.title = '打开解释栏';
+  }
+  if (els.paneClose) {
+    els.paneClose.hidden = false;
+    els.paneClose.title = state.narrow ? '收起解释栏' : '收起解释栏';
+  }
+}
+
+function openPane() {
+  if (!state.narrow) return;
+  state.paneOpen = true;
+  appEl.classList.add('pane-open');
+  els.drawerBackdrop.hidden = false;
+}
+
+function closePane() {
+  state.paneOpen = false;
+  appEl.classList.remove('pane-open');
+  if (els.drawerBackdrop) els.drawerBackdrop.hidden = true;
+}
+
+function togglePane() {
+  if (state.narrow) {
+    if (state.paneOpen) closePane();
+    else openPane();
+    return;
+  }
+  setCollapsed(!state.paneCollapsed);
+}
+
+// ---------- 宿主消息 ----------
+
+function handleHostTheme(theme) {
+  // bridge.applyTheme 已把颜色写进 --pr-*；布局只需在窗口尺寸变化时调整
+  if (theme?.mode) updateNarrow();
+}
+
+function handleChatAck(data) {
+  if (data?.ok) {
+    toast(data.mode === 'send' ? '已发送到对话' : '已填入对话输入框');
+    return;
+  }
+  const reasons = {
+    'no-session': '当前没有打开的会话，内容已复制到剪贴板',
+    clipboard: '复制到剪贴板失败，请手动复制',
+    'bridge-error': '会话桥接失败，请重试',
+  };
+  toast(reasons[data?.reason] || `转入对话失败${data?.reason ? `（${data.reason}）` : ''}`, 'error');
+}
+
+// ---------- 错误条 / toast / busy ----------
+
+function showError(message, { retry } = {}) {
+  if (!els.errorbar) return;
+  els.errorText.textContent = message;
+  els.errorbar.hidden = false;
+  errorRetry = typeof retry === 'function' ? retry : null;
+  els.errorRetry.hidden = !errorRetry;
+}
+
+function hideError() {
+  if (els.errorbar) els.errorbar.hidden = true;
+  errorRetry = null;
+}
+
+function toast(message, kind = 'info') {
+  if (!els.toast) return;
+  clearTimeout(toastTimer);
+  els.toast.textContent = message;
+  els.toast.classList.toggle('error', kind === 'error');
+  els.toast.hidden = false;
+  toastTimer = setTimeout(() => {
+    els.toast.hidden = true;
+  }, 3600);
+}
+
+function setBusy(flag, text) {
+  if (!els.busy) return;
+  els.busy.hidden = !flag;
+  if (text) els.busyText.textContent = text;
+}
+
+async function probeHealth() {
+  const health = await state.api.health();
+  if (!health) {
+    showError('插件服务未响应（/api/health 不可达）。请确认文献阅读坞插件已安装并重启 DSH。', {
+      retry: () => location.reload(),
+    });
+    return;
+  }
+  if (health.ok && (health.python === false || health.fitz == null)) {
+    showError('PDF 抽取不可用：找不到 python3 或 PyMuPDF（import fitz 失败）。安装：python3 -m pip install PyMuPDF', {
+      retry: () => location.reload(),
+    });
+  }
+}
+
+// ---------- 启动 ----------
+
+main().catch((err) => {
+  console.error('[paper-reader] 启动失败', err);
+  if (els.errorbar) {
+    showError(`阅读器启动失败：${err?.message || err}`, { retry: () => location.reload() });
+  }
+});

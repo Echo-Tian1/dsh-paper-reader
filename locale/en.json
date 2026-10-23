@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "title": "Paper Reader",
+    "description": "Open a PDF paper in a left-hand dock (original layout, text selectable), explain a selected sentence with its context, cache every explanation per sentence and keep per-paper history; send it to the chat with one click."
+  }
+}

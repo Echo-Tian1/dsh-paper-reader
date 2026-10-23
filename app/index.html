@@ -1,0 +1,100 @@
+<!doctype html>
+<html lang="zh-CN" data-theme="auto">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <link rel="icon" href="data:,">
+  <title>文献阅读坞</title>
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <div id="app" class="app">
+    <header id="topbar" class="topbar">
+      <div class="topbar-left">
+        <button id="pane-toggle" class="icon-btn pane-toggle" type="button" title="打开解释栏" aria-label="打开解释栏" hidden>解</button>
+        <span class="brand" title="文献阅读坞">文献阅读坞</span>
+        <span id="doc-title" class="doc-title">未打开论文</span>
+      </div>
+      <div class="topbar-right">
+        <span id="page-indicator" class="page-indicator" title="当前页 / 总页数" hidden>1 / 1</span>
+        <label class="select-wrap" title="最近论文">
+          <select id="docs-select" class="docs-select" aria-label="最近论文" hidden></select>
+        </label>
+        <button id="upload-btn" class="btn" type="button">上传 PDF</button>
+        <input id="file-input" type="file" accept="application/pdf,.pdf" hidden>
+      </div>
+    </header>
+
+    <div id="errorbar" class="errorbar" hidden>
+      <span id="error-text" class="error-text"></span>
+      <button id="error-retry" class="btn btn-ghost" type="button" hidden>重试</button>
+      <button id="error-close" class="icon-btn" type="button" aria-label="关闭提示">×</button>
+    </div>
+
+    <main class="main">
+      <section id="paper-area" class="paper-area">
+        <div id="paper-scroll" class="paper-scroll" tabindex="0">
+          <div id="paper-content" class="paper-content"></div>
+        </div>
+
+        <div id="empty-state" class="empty-state" hidden>
+          <div class="empty-inner">
+            <div class="empty-icon" aria-hidden="true">PDF</div>
+            <h2>把论文拖进来</h2>
+            <p class="empty-sub">支持带文字层的 PDF（中 / 英），按原版面渲染，可选中、可解释。</p>
+            <button id="empty-upload" class="btn btn-primary" type="button">选择 PDF 文件</button>
+            <p class="empty-hint">也可以把 PDF 路径发给我，我帮你打开。</p>
+            <div class="empty-recent">
+              <h3>最近论文</h3>
+              <ul id="recent-list" class="recent-list"></ul>
+              <p id="recent-empty" class="empty-sub" hidden>还没有导入过论文。</p>
+            </div>
+          </div>
+        </div>
+
+        <div id="drop-overlay" class="drop-overlay" hidden>
+          <div class="drop-card">
+            <div class="drop-icon" aria-hidden="true">↓</div>
+            <div>松开以打开 PDF</div>
+          </div>
+        </div>
+      </section>
+
+      <aside id="explain-pane" class="explain-pane" aria-label="解释栏">
+        <div class="pane-head">
+          <div class="tabs" role="tablist">
+            <button id="tab-current" class="tab active" type="button" role="tab" aria-selected="true">当前句</button>
+            <button id="tab-history" class="tab" type="button" role="tab" aria-selected="false">历史</button>
+          </div>
+          <button id="pane-close" class="icon-btn" type="button" aria-label="收起解释栏">×</button>
+        </div>
+
+        <div id="pane-current" class="pane-body">
+          <div id="thread" class="thread" aria-live="polite"></div>
+        </div>
+
+        <div id="pane-history" class="pane-body" hidden>
+          <div id="history-list" class="history-list"></div>
+        </div>
+      </aside>
+    </main>
+
+    <div id="drawer-backdrop" class="drawer-backdrop" hidden></div>
+  </div>
+
+  <div id="selection-toolbar" class="selection-toolbar" hidden>
+    <button class="tb-btn tb-primary" type="button" data-act="explain">解释</button>
+    <button class="tb-btn" type="button" data-act="copy">复制</button>
+    <button class="tb-btn tb-cancel" type="button" data-act="cancel">取消</button>
+  </div>
+
+  <div id="toast" class="toast" hidden></div>
+
+  <div id="busy" class="busy" hidden>
+    <div class="spinner" aria-hidden="true"></div>
+    <div id="busy-text" class="busy-text">正在打开…</div>
+  </div>
+
+  <script type="module" src="app.js"></script>
+</body>
+</html>

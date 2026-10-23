@@ -1,0 +1,24 @@
+{
+ "index": [
+  {
+   "id": "e_fixture01",
+   "key": "k111111111111111111111111111111111111111111111111111111111111111",
+   "paraId": "p1",
+   "page": 1,
+   "selText": "Attention mechanisms have become an integral part of compelling sequence modeling and transduction models in various tasks.",
+   "createdAt": "2026-10-22T07:30:00.000Z",
+   "hitCount": 2,
+   "recipe": "v1"
+  },
+  {
+   "id": "e_fixture02",
+   "key": "k333333333333333333333333333333333333333333333333333333333333333",
+   "paraId": "p5",
+   "page": 2,
+   "selText": "The encoder is composed of a stack of six identical layers, each with two sub-layers.",
+   "createdAt": "2026-10-22T07:50:00.000Z",
+   "hitCount": 0,
+   "recipe": "v1"
+  }
+ ]
+}
