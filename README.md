@@ -8,6 +8,26 @@
 - **按论文留历史**：解释过的句子在原文上留淡色标记，点开即旧解释；历史 tab 可回看、点条目跳回原文定位。
 - **转到对话**：一键把「原句 + 上下文 + 已有解释」填进当前 DSH 对话输入框，接着追问。
 
+## 它长什么样
+
+阅读坞（左：论文；坞内右：解释栏；再往右是 DSH 自己的导航与对话）：
+
+![左坞布局](../docs/screenshots/dock-layout.png)
+
+选中一句 → 解释带上下文，三段式：
+
+![解释带上下文](../docs/screenshots/explain-with-context.png)
+
+同一句再点一次，命中缓存（0 token）：
+
+![缓存命中](../docs/screenshots/cache-hit.png)
+
+历史与原文标记：
+
+![历史](../docs/screenshots/history.png)
+
+> 截图 1 是布局验收脚本（`scripts/dock-harness.mjs`）在同构的 DSH 框架上跑出来的，中间的导航与对话是占位块；截图 2–4 是真实预览服务器 + 真实模型。
+
 ---
 
 ## 安装（本机）
