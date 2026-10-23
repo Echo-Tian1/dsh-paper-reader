@@ -84,6 +84,41 @@ $DSH_HOME/plugin-data/paper-reader/      # 默认 ~/.dsh/plugin-data/paper-reade
 - 非 CJK 页的单词之间**没有**额外空格元素，客户端自己补空格。
 - `p1` 是 `structure.paras[].id`，用于选区反查段落。
 
+### `GET /api/docs/<id>/links`
+PDF 内部/外部链接（引用、图表、URL），由抽取阶段用 `page.get_links()` 生成，存 `docs/<id>/links.json`。
+```json
+{ "version": 1, "pages": [ { "n": 3, "links": [
+    { "rect": [x0,y0,x1,y1], "kind": "goto", "page": 11, "to": [x,y], "text": "[12]" },
+    { "rect": [x0,y0,x1,y1], "kind": "uri", "uri": "https://…", "text": "arXiv" }
+] } ] }
+```
+- `rect` 为 PDF 点坐标；`text` 是该区域文字层的文字（截断 120 字），用于悬停提示。
+- `kind:"goto"` 带 `page`（1-based）；`kind:"uri"` 带 `uri`；其它 kind（launch/named 等）一律省略。
+
+### 批注（高亮 / 笔记）
+`docs/<id>/annotations.json`：`{ "version":1, "items":[ ... ] }`，追加式新增、按 id 改/删。
+
+```
+GET    /api/docs/<id>/annotations                 → { items:[Annotation...] }
+POST   /api/docs/<id>/annotations                 → { item }
+PATCH  /api/docs/<id>/annotations/<aid>           → { item }
+DELETE /api/docs/<id>/annotations/<aid>           → { ok:true }
+```
+Annotation：
+```json
+{ "id":"a_<12hex>", "kind":"highlight",        // highlight | note
+  "page":3, "rects":[[x0,y0,x1,y1], ...],      // 每个高亮矩形（PDF 点）
+  "text":"原文选中文字", "note":"我的批注", "color":"yellow",  // yellow|green|blue|pink
+  "paraId":"p12", "createdAt":"ISO", "updatedAt":"ISO" }
+```
+- POST body：`{ kind, page, rects, text, note?, color?, paraId? }`；`rects` 为空或非法 → 400。
+- PATCH body：`{ note?, color? }`；只改这两项。
+- 同一篇论文的批注存在一个 JSON 里，原子写（tmp+rename）。
+
+### `GET /api/docs/<id>/notes.md`
+导出 Markdown（`text/markdown; charset=utf-8`，`content-disposition: attachment`）：
+标题 + 元信息、`## 批注`（按页分组，引用原文 + 备注 + 颜色）、`## 术语表`（表格：术语/中文/说明/次数）。
+
 ### `GET /api/docs/<id>/file`
 返回上传时保存的**原始 PDF**（`application/pdf`，`content-disposition: inline; filename*=UTF-8''<标题>.pdf`）。
 文件在 `docs/<id>/source.pdf`，不重新生成；`<id>` 无对应目录时 404。

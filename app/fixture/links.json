@@ -1,0 +1,56 @@
+{
+ "version": 1,
+ "pages": [
+  {
+   "n": 1,
+   "links": [
+    {
+     "rect": [
+      54,
+      300,
+      290,
+      340
+     ],
+     "kind": "goto",
+     "page": 2,
+     "to": [
+      60,
+      84
+     ],
+     "text": "The Transformer follows this overall architecture …"
+    },
+    {
+     "rect": [
+      322,
+      72,
+      470,
+      86
+     ],
+     "kind": "uri",
+     "uri": "https://arxiv.org/abs/1706.03762",
+     "text": "arXiv:1706.03762"
+    }
+   ]
+  },
+  {
+   "n": 2,
+   "links": [
+    {
+     "rect": [
+      54,
+      66,
+      558,
+      100
+     ],
+     "kind": "goto",
+     "page": 1,
+     "to": [
+      54,
+      72
+     ],
+     "text": "Back to Introduction"
+    }
+   ]
+  }
+ ]
+}

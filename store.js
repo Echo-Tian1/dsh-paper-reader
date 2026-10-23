@@ -412,6 +412,181 @@ export function renderTermsMarkdown(doc, terms) {
 }
 
 // ---------------------------------------------------------------------------
+// 批注 annotations.json（追加式，原子写；读-改-写按文档串行，避免并发丢写）
+// ---------------------------------------------------------------------------
+
+export const ANNOTATION_COLORS = ['yellow', 'green', 'blue', 'pink']
+export const ANNOTATION_KINDS = ['highlight', 'note']
+export const ANNOTATION_TEXT_LIMIT = 4000
+
+/** 同一篇论文的批注串行队列：POST/PATCH/DELETE 并发时不会互相覆盖。 */
+const annotationQueues = new Map()
+
+function withAnnotationQueue(docId, task) {
+  const previous = annotationQueues.get(docId) ?? Promise.resolve()
+  const next = previous.catch(() => {}).then(task)
+  annotationQueues.set(docId, next)
+  next.finally(() => {
+    if (annotationQueues.get(docId) === next) annotationQueues.delete(docId)
+  }).catch(() => {})
+  return next
+}
+
+export function linksPath(docId, env = process.env) {
+  return path.join(docDir(docId, env), 'links.json')
+}
+
+export function annotationsPath(docId, env = process.env) {
+  return path.join(docDir(docId, env), 'annotations.json')
+}
+
+/** 新批注 id：a_<12 位十六进制>（CONTRACT）。 */
+export function newAnnotationId() {
+  return `a_${randomBytes(6).toString('hex')}`
+}
+
+/** 读批注列表（保持落盘顺序；缺失文件返回 []，老文档兼容）。 */
+export async function readAnnotations(docId, env = process.env) {
+  const raw = await readJson(annotationsPath(docId, env), null)
+  if (Array.isArray(raw)) return raw
+  if (raw && Array.isArray(raw.items)) return raw.items
+  return []
+}
+
+export async function writeAnnotations(docId, items, env = process.env) {
+  await writeJsonAtomic(annotationsPath(docId, env), { version: 1, items })
+  return items
+}
+
+/** 追加一条批注（串行读改写 + 原子写）。 */
+export async function appendAnnotation(docId, item, env = process.env) {
+  return withAnnotationQueue(docId, async () => {
+    const items = await readAnnotations(docId, env)
+    items.push(item)
+    await writeAnnotations(docId, items, env)
+    return item
+  })
+}
+
+/** 按 id 更新批注（PATCH 只允许 note/color，路由层已校验）；找不到抛 not-found。 */
+export async function updateAnnotation(docId, id, patch, env = process.env) {
+  return withAnnotationQueue(docId, async () => {
+    const items = await readAnnotations(docId, env)
+    const index = items.findIndex(item => item && item.id === id)
+    if (index === -1) throw new PaperError('not-found', `批注不存在：${String(id)}`, 404)
+    items[index] = { ...items[index], ...patch, updatedAt: new Date().toISOString() }
+    await writeAnnotations(docId, items, env)
+    return items[index]
+  })
+}
+
+/** 按 id 删除批注；不存在抛 not-found（CONTRACT：DELETE 不存在返回 404）。 */
+export async function deleteAnnotation(docId, id, env = process.env) {
+  return withAnnotationQueue(docId, async () => {
+    const items = await readAnnotations(docId, env)
+    const index = items.findIndex(item => item && item.id === id)
+    if (index === -1) throw new PaperError('not-found', `批注不存在：${String(id)}`, 404)
+    items.splice(index, 1)
+    await writeAnnotations(docId, items, env)
+    return true
+  })
+}
+
+// ---------------------------------------------------------------------------
+// 阅读笔记 Markdown 导出（避免 markdown 注入：引用块逐行加 "> "，表格单元格转义）
+// ---------------------------------------------------------------------------
+
+/** 表格单元格：转义反斜杠与竖线，折叠换行。 */
+function notesTableCell(value) {
+  return String(value ?? '')
+    .replace(/\\/g, '\\\\')
+    .replace(/\|/g, '\\|')
+    .replace(/\r?\n/g, ' ')
+    .trim()
+}
+
+/** 引用块单行：每行前缀 "> "；同时转义会破坏结构的行首标记（标题/嵌套引用/列表/代码块）。 */
+function notesBlockquoteLine(line) {
+  let escaped = String(line ?? '').replace(/\|/g, '\\|')
+  escaped = escaped.replace(/^(\s*)([#>`\-+*])/, (match, space, char) => `${space}\\${char}`)
+  escaped = escaped.replace(/^(\s*)(\d+)\./, (match, space, number) => `${space}${number}\\.`)
+  return `> ${escaped}`
+}
+
+function notesBlockquote(text) {
+  const normalized = String(text ?? '').replace(/\r\n?/g, '\n')
+  const lines = normalized.split('\n')
+  if (lines.length === 1 && lines[0] === '') return ['>']
+  return lines.map(line => notesBlockquoteLine(line))
+}
+
+/**
+ * 生成阅读笔记 Markdown：
+ * 标题 + 元信息（页数/导入时间/解释数/术语数）+ `## 批注`（按页分组）+ `## 术语表`。
+ * @param {{doc?:object,structure?:object,annotations?:object[],terms?:object[],explanationCount?:number}} input
+ */
+export function renderNotesMarkdown({ doc = {}, structure = {}, annotations = [], terms = [], explanationCount = 0 } = {}) {
+  const title = String(doc?.title ?? structure?.title ?? '').replace(/\r?\n/g, ' ').trim() || '论文'
+  const pageCount = Number(structure?.pageCount) || (Array.isArray(structure?.pages) ? structure.pages.length : 0)
+  const items = Array.isArray(annotations) ? annotations : []
+  const termList = Array.isArray(terms) ? terms : []
+  const lines = [
+    `# ${title} · 阅读笔记`,
+    '',
+    `- 页数：${pageCount}`,
+    `- 导入时间：${doc?.addedAt ?? '（未知）'}`,
+    `- 解释数：${Number(explanationCount) || 0}`,
+    `- 术语数：${termList.length}`,
+    '',
+    '## 批注',
+    '',
+  ]
+
+  if (items.length === 0) {
+    lines.push('暂无批注。', '')
+  } else {
+    const byPage = new Map()
+    for (const item of items) {
+      const page = Number(item?.page) || 1
+      if (!byPage.has(page)) byPage.set(page, [])
+      byPage.get(page).push(item)
+    }
+    for (const page of [...byPage.keys()].sort((left, right) => left - right)) {
+      lines.push(`### 第 ${page} 页`, '')
+      const entries = byPage.get(page).slice().sort((left, right) => (Date.parse(left.createdAt ?? '') || 0) - (Date.parse(right.createdAt ?? '') || 0))
+      for (const item of entries) {
+        lines.push(...notesBlockquote(item.text ?? ''))
+        if (item.note) {
+          lines.push('>')
+          const noteLines = notesBlockquote(item.note)
+          noteLines.forEach((line, index) => {
+            lines.push(index === 0 ? line.replace(/^> /, '> 备注：') : line)
+          })
+        }
+        lines.push('>')
+        lines.push(`> 颜色：${String(item.color ?? 'yellow')}`)
+        lines.push('')
+      }
+    }
+  }
+
+  lines.push('## 术语表', '')
+  if (termList.length === 0) {
+    lines.push('暂无术语。', '')
+  } else {
+    lines.push('| 术语 | 中文 | 说明 | 出现次数 |', '| --- | --- | --- | --- |')
+    for (const item of termList) {
+      lines.push(
+        `| ${notesTableCell(item.term)} | ${notesTableCell(item.zh)} | ${notesTableCell(item.note)} | ${Number(item.count) || 0} |`,
+      )
+    }
+    lines.push('')
+  }
+  lines.push('> 由文献阅读坞导出。', '')
+  return lines.join('\n')
+}
+
+// ---------------------------------------------------------------------------
 // 读取抽取产物（结构 / 页词坐标）
 // ---------------------------------------------------------------------------
 

@@ -38,6 +38,16 @@ const state = {
 };
 
 let pendingRegion = null; // { page, rect }：框选完、等工具条确认的区域
+let searchTimer = null;
+let searchState = { open: false, query: '', matches: [], index: -1 };
+let tocTimer = null;
+let tocOpen = false;
+let linkBack = [];        // 返回栈：[{page, scrollTop}]（不可变数组）
+let portalLink = null;
+let annotations = [];     // 当前论文批注（不可变快照）
+let activeAnnotation = null;
+let annoNoteTimer = null;
+const LS_LINKS = 'pr.links';
 
 // ---------- HTTP 客户端（正式模式） ----------
 
@@ -131,6 +141,50 @@ const httpApi = {
     return postStream(`${API_BASE}/api/explain-region`, body, signal);
   },
 
+  async getAnnotations(docId) {
+    return parseResponse(
+      await fetch(`${API_BASE}/api/docs/${encodeURIComponent(docId)}/annotations`, { cache: 'no-store' })
+    );
+  },
+
+  async createAnnotation(docId, body) {
+    return parseResponse(
+      await fetch(`${API_BASE}/api/docs/${encodeURIComponent(docId)}/annotations`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify(body),
+      })
+    );
+  },
+
+  async patchAnnotation(docId, annotationId, body) {
+    return parseResponse(
+      await fetch(`${API_BASE}/api/docs/${encodeURIComponent(docId)}/annotations/${encodeURIComponent(annotationId)}`, {
+        method: 'PATCH',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify(body),
+      })
+    );
+  },
+
+  async deleteAnnotation(docId, annotationId) {
+    return parseResponse(
+      await fetch(`${API_BASE}/api/docs/${encodeURIComponent(docId)}/annotations/${encodeURIComponent(annotationId)}`, {
+        method: 'DELETE',
+      })
+    );
+  },
+
+  notesMdUrl(docId) {
+    return `${API_BASE}/api/docs/${encodeURIComponent(docId)}/notes.md`;
+  },
+
+  async getLinks(docId) {
+    return parseResponse(
+      await fetch(`${API_BASE}/api/docs/${encodeURIComponent(docId)}/links`, { cache: 'no-store' })
+    );
+  },
+
   async getTerms(docId) {
     return parseResponse(
       await fetch(`${API_BASE}/api/docs/${encodeURIComponent(docId)}/terms`, { cache: 'no-store' })
@@ -181,9 +235,9 @@ function reportClientError(label, detail) {
 
 const EXPECTED_NODES = [
   'topbar', 'paper-area', 'paper-content', 'explain-pane',
-  'tab-current', 'tab-history', 'tab-terms',
-  'pane-current', 'pane-history', 'pane-terms',
-  'thread', 'history-list', 'terms-list',
+  'tab-current', 'tab-history', 'tab-terms', 'tab-notes',
+  'pane-current', 'pane-history', 'pane-terms', 'pane-notes',
+  'thread', 'history-list', 'terms-list', 'notes-list',
 ];
 function missingNodes() {
   return EXPECTED_NODES.filter((id) => !document.getElementById(id));
@@ -269,6 +323,9 @@ async function main() {
     getRegionThumbnail: (page, rect) => paper.regionThumbnail(page, rect),
     ensurePageImage: (page) => paper.ensurePageImage(page),
     onTermJump: (term) => paper.jumpToTerm(term),
+    onAnnotationJump: (item) => {
+      if (item) paper.jumpToAnnotation(item);
+    },
     onJumpEntry: (entry) => {
       paper.scrollToPage(entry.page);
       if (entry.kind === 'region') paper.flashRegion(entry.page, entry.rect);
@@ -309,6 +366,8 @@ async function main() {
     },
     onPageChange: handlePageChange,
     onRegionChange: handleRegionChange,
+    onLinkActivate: (link, opts) => handleLinkActivate(link, opts),
+    onOpenAnnotation: (item) => openAnnotationPopover(item),
     toast,
   });
   } catch (err) {
@@ -316,6 +375,9 @@ async function main() {
   }
 
   explain.setEmbedded(bridge.embedded);
+
+  applyZoom(readStoredZoom(), { persist: false });
+  setLinksUi(readStoredLinks(), { persist: false });
 
   await refreshDocs();
 
@@ -373,6 +435,35 @@ function cacheEls() {
     'tab-docs',
     'pane-docs',
     'docs-list',
+    'zoom-out',
+    'zoom-label',
+    'zoom-in',
+    'search-btn',
+    'search-bar',
+    'search-input',
+    'search-count',
+    'search-prev',
+    'search-next',
+    'search-close',
+    'toc-btn',
+    'toc-panel',
+    'toc-backdrop',
+    'toc-list',
+    'toc-close',
+    'links-toggle',
+    'back-pill',
+    'link-portal',
+    'link-portal-title',
+    'link-portal-img',
+    'link-portal-close',
+    'link-portal-open',
+    'anno-popover',
+    'anno-close',
+    'anno-quote',
+    'anno-note',
+    'anno-colors',
+    'anno-delete',
+    'anno-status',
   ];
   for (const id of ids) {
     els[id.replace(/-([a-z])/g, (_, ch) => ch.toUpperCase())] = document.getElementById(id);
@@ -419,6 +510,10 @@ function wireEvents() {
       const info = state.sel;
       hideToolbar();
       if (info) runTranslate(info);
+    } else if (action === 'highlight') {
+      const info = state.sel;
+      hideToolbar();
+      if (info) void createHighlight(info);
     } else if (action === 'copy') {
       const info = state.sel;
       hideToolbar();
@@ -435,6 +530,55 @@ function wireEvents() {
   }, { passive: true });
 
   wireRegionToolbar();
+  wireAnnotationPopover();
+
+  els.linksToggle.addEventListener('click', () => {
+    setLinksUi(!state.linksEnabled);
+    toast(state.linksEnabled ? '链接热区已开启：点击引用/图表可跳转' : '链接热区已关闭（Alt+点击仍可跳转）');
+  });
+  els.backPill.addEventListener('click', restoreLinkBack);
+  els.linkPortalClose.addEventListener('click', closeLinkPortal);
+  els.linkPortalOpen.addEventListener('click', () => {
+    const link = portalLink;
+    closeLinkPortal();
+    if (link) jumpToLink(link);
+  });
+
+  els.tocBtn.addEventListener('click', () => {
+    if (tocOpen) closeToc();
+    else openToc();
+  });
+  els.tocClose.addEventListener('click', closeToc);
+  els.tocBackdrop.addEventListener('click', closeToc);
+
+  els.searchBtn.addEventListener('click', () => {
+    if (searchState.open) closeSearch();
+    else openSearch();
+  });
+  els.searchClose.addEventListener('click', () => closeSearch());
+  els.searchPrev.addEventListener('click', () => stepSearch(-1));
+  els.searchNext.addEventListener('click', () => stepSearch(1));
+  els.searchInput.addEventListener('input', () => {
+    clearTimeout(searchTimer);
+    searchTimer = setTimeout(() => runSearchNow(), 160);
+  });
+  els.searchInput.addEventListener('keydown', (event) => {
+    if (event.key === 'Enter') {
+      event.preventDefault();
+      event.stopPropagation();
+      stepSearch(event.shiftKey ? -1 : 1);
+    } else if (event.key === 'Escape') {
+      event.preventDefault();
+      event.stopPropagation();
+      closeSearch();
+    }
+  });
+
+  els.zoomOut.addEventListener('click', () => applyZoom(paper.getZoom() - paper.ZOOM_STEP));
+  els.zoomIn.addEventListener('click', () => applyZoom(paper.getZoom() + paper.ZOOM_STEP));
+  els.zoomLabel.addEventListener('click', () => applyZoom(1));
+
+  document.addEventListener('keydown', handleGlobalKeydown);
 
   document.addEventListener('dragenter', onDragEnter);
   document.addEventListener('dragover', onDragOver);
@@ -444,6 +588,10 @@ function wireEvents() {
   window.addEventListener('resize', updateNarrow);
   document.addEventListener('keydown', (event) => {
     if (event.key === 'Escape') {
+      if (!els.annoPopover?.hidden) { closeAnnotationPopover(); return; }
+      if (portalLink) { closeLinkPortal(); return; }
+      if (searchState.open) { closeSearch(); return; }
+      if (tocOpen) { closeToc(); return; }
       hideToolbar();
       if (pendingRegion) cancelRegion();
     }
@@ -528,6 +676,9 @@ async function openDoc(docId, { restoreScrollTop = null } = {}) {
   if (!docId || !state.api) return;
   hideToolbar();
   cancelRegion();
+  closeSearch();
+  closeToc();
+  closeAnnotationPopover();   // 先按旧文档 flush 未保存备注，再切文档
   setBusy(true, '正在打开论文…');
   try {
     const structure = await state.api.getStructure(docId);
@@ -568,6 +719,30 @@ async function openDoc(docId, { restoreScrollTop = null } = {}) {
       indexPayload = null;
     }
     paper.setExplanations(indexPayload || []);
+
+    let linksPayload = null;
+    try {
+      linksPayload = await state.api.getLinks(docId);
+    } catch (err) {
+      linksPayload = null;
+    }
+    paper.setLinks(linksPayload || { version: 1, pages: [] });
+    paper.setLinksEnabled(state.linksEnabled);
+
+    let annotationsPayload = null;
+    try {
+      annotationsPayload = await state.api.getAnnotations(docId);
+    } catch (err) {
+      annotationsPayload = null;
+    }
+    annotations = Array.isArray(annotationsPayload?.items) ? [...annotationsPayload.items] : [];
+    paper.setAnnotations(annotations);
+    closeAnnotationPopover();
+    explain.invalidateAnnotations();
+
+    closeLinkPortal();
+    linkBack = [];
+    updateBackPill();
 
     state.ui = { ...state.ui, lastDocId: docId };
     persistUi();
@@ -1021,6 +1196,507 @@ function handleChatAck(data) {
   // 不管是「没找到会话」还是「桥接失败」，都先试兼容写入：
   // 只要 DSH 窗口里有可见的输入框，就说明有会话，直接写进去最可靠。
   fallbackChatRoute(pending.payload, data?.reason, data?.detail);
+}
+
+// ---------- 手动缩放 ----------
+
+const LS_ZOOM = 'pr.zoom';
+
+function readStoredZoom() {
+  try {
+    const raw = window.localStorage.getItem(LS_ZOOM);
+    return raw == null ? 1 : paper.clampZoom(raw);
+  } catch (err) {
+    return 1;
+  }
+}
+
+function applyZoom(value, { persist = true } = {}) {
+  const zoom = paper.setZoom(value);
+  if (persist) {
+    try { window.localStorage.setItem(LS_ZOOM, String(zoom)); } catch (err) { /* 隐私模式 */ }
+  }
+  updateZoomUi();
+  return zoom;
+}
+
+function updateZoomUi() {
+  if (!els.zoomLabel) return;
+  const zoom = paper.getZoom();
+  els.zoomLabel.textContent = paper.zoomLabel(zoom);
+  els.zoomOut.disabled = zoom <= paper.ZOOM_MIN;
+  els.zoomIn.disabled = zoom >= paper.ZOOM_MAX;
+}
+
+// ---------- 高亮 / 批注 ----------
+
+async function createHighlight(info) {
+  if (!info || !state.doc) return;
+  const rects = paper.selectionRects(info);
+  if (!rects.length) {
+    toast('没有可高亮的文字区域', 'error');
+    return;
+  }
+  const body = {
+    kind: 'highlight',
+    page: info.page,
+    rects,
+    text: info.text,
+    color: 'yellow',
+    ...(info.paraId ? { paraId: info.paraId } : {}),
+  };
+  try {
+    const res = await state.api.createAnnotation(state.doc.id, body);
+    const item = res?.item;
+    if (!item) throw new Error('接口没有返回批注');
+    annotations = [...annotations, item];
+    paper.addAnnotation(item);
+    explain.invalidateAnnotations();
+    paper.clearSelection();
+    toast('已高亮，点击色块可写批注');
+    openAnnotationPopover(item);
+  } catch (err) {
+    showError(`保存高亮失败：${err.message || err}`, { retry: () => createHighlight(info) });
+  }
+}
+
+function openAnnotationPopover(item) {
+  if (!item) return;
+  activeAnnotation = item;
+  clearTimeout(annoNoteTimer);
+  els.annoPopover.hidden = false;
+  els.annoQuote.textContent = item.text || '（无摘录）';
+  els.annoNote.value = item.note || '';
+  els.annoStatus.textContent = '';
+  const color = item.color || 'yellow';
+  for (const btn of els.annoColors.querySelectorAll('[data-color]')) {
+    btn.setAttribute('aria-pressed', String(btn.dataset.color === color));
+  }
+  positionAnnotationPopover(item);
+}
+
+function positionAnnotationPopover(item) {
+  const anchor = paper.annotationScreenRect(item);
+  const bar = els.annoPopover;
+  const width = bar.offsetWidth || 300;
+  const height = bar.offsetHeight || 210;
+  let left = window.innerWidth / 2 - width / 2;
+  let top = window.innerHeight / 2 - height / 2;
+  if (anchor) {
+    left = anchor.left + anchor.width / 2 - width / 2;
+    top = anchor.top + anchor.height + 8;
+    if (top + height > window.innerHeight - 8) top = anchor.top - height - 8;
+  }
+  left = Math.min(Math.max(left, 8), window.innerWidth - width - 8);
+  top = Math.min(Math.max(top, 56), window.innerHeight - height - 8);
+  bar.style.left = `${Math.round(left)}px`;
+  bar.style.top = `${Math.round(top)}px`;
+}
+
+function closeAnnotationPopover({ flush = true } = {}) {
+  if (flush) flushAnnotationNote();
+  activeAnnotation = null;
+  clearTimeout(annoNoteTimer);
+  if (els.annoPopover) els.annoPopover.hidden = true;
+}
+
+function patchActiveAnnotation(patch, { silent = false } = {}) {
+  const item = activeAnnotation;
+  if (!item || !state.doc) return Promise.resolve(null);
+  return state.api
+    .patchAnnotation(state.doc.id, item.id, patch)
+    .then((res) => {
+      const updated = res?.item;
+      if (updated) {
+        activeAnnotation = updated;
+        annotations = annotations.map((a) => (a.id === updated.id ? updated : a));
+        paper.updateAnnotation(updated);
+        explain.invalidateAnnotations();
+        if (!silent) els.annoStatus.textContent = '已保存';
+        setTimeout(() => {
+          if (els.annoStatus) els.annoStatus.textContent = '';
+        }, 1500);
+      }
+      return updated;
+    })
+    .catch((err) => {
+      els.annoStatus.textContent = '保存失败';
+      toast(`保存批注失败：${err.message || err}`, 'error');
+      return null;
+    });
+}
+
+function flushAnnotationNote() {
+  clearTimeout(annoNoteTimer);
+  const item = activeAnnotation;
+  if (!item) return;
+  const note = els.annoNote.value.trim();
+  if (note === (item.note || '')) return;
+  void patchActiveAnnotation({ note });
+}
+
+function scheduleAnnotationNoteSave() {
+  clearTimeout(annoNoteTimer);
+  annoNoteTimer = setTimeout(() => {
+    flushAnnotationNote();
+  }, 600);
+}
+
+async function deleteActiveAnnotation() {
+  const item = activeAnnotation;
+  if (!item || !state.doc) return;
+  try {
+    await state.api.deleteAnnotation(state.doc.id, item.id);
+    annotations = annotations.filter((a) => a.id !== item.id);
+    paper.removeAnnotation(item.id);
+    explain.invalidateAnnotations();
+    closeAnnotationPopover({ flush: false });
+    toast('已删除批注');
+  } catch (err) {
+    toast(`删除批注失败：${err.message || err}`, 'error');
+  }
+}
+
+if (FIXTURE) {
+  window.__prDebug = {
+    annotations: () => annotations.map((a) => ({ id: a.id, page: a.page, color: a.color, note: a.note })),
+    activeAnnotation: () => (activeAnnotation ? { id: activeAnnotation.id, color: activeAnnotation.color } : null),
+  };
+}
+
+function wireAnnotationPopover() {
+  if (!els.annoPopover) return;
+  els.annoClose.addEventListener('click', () => closeAnnotationPopover());
+  els.annoDelete.addEventListener('click', () => {
+    void deleteActiveAnnotation();
+  });
+  els.annoNote.addEventListener('input', scheduleAnnotationNoteSave);
+  els.annoNote.addEventListener('blur', () => flushAnnotationNote());
+  els.annoColors.addEventListener('click', (event) => {
+    const color = event.target.closest('[data-color]')?.dataset.color;
+    if (!color || !activeAnnotation) return;
+    for (const btn of els.annoColors.querySelectorAll('[data-color]')) {
+      btn.setAttribute('aria-pressed', String(btn.dataset.color === color));
+    }
+    void patchActiveAnnotation({ color });
+  });
+  document.addEventListener('pointerdown', (event) => {
+    if (!els.annoPopover || els.annoPopover.hidden) return;
+    if (event.target.closest('#anno-popover')) return;
+    // 点另一个高亮时，让点击捕获逻辑打开新的浮层；这里只关闭旧的
+    closeAnnotationPopover();
+  });
+}
+
+// ---------- 链接跳转 / 返回栈 / 双开对照 ----------
+
+function readStoredLinks() {
+  try {
+    return window.localStorage.getItem(LS_LINKS) === '1';
+  } catch (err) {
+    return false;
+  }
+}
+
+function setLinksUi(enabled, { persist = true } = {}) {
+  state.linksEnabled = !!enabled;
+  paper.setLinksEnabled(state.linksEnabled);
+  if (els.linksToggle) {
+    els.linksToggle.setAttribute('aria-pressed', String(state.linksEnabled));
+    els.linksToggle.title = state.linksEnabled
+      ? '链接热区已开启（点击引用/图表跳转；Alt+点击双开对照）'
+      : '显示可点击链接热区（Alt/Option+点击始终可用）';
+  }
+  if (persist) {
+    try { window.localStorage.setItem(LS_LINKS, state.linksEnabled ? '1' : '0'); } catch (err) { /* 隐私模式 */ }
+  }
+}
+
+function handleLinkActivate(link, { alt = false } = {}) {
+  if (!link || !state.doc) return;
+  if (link.kind === 'uri') {
+    openExternalLink(link);
+    return;
+  }
+  if (link.kind !== 'goto') return;
+  if (alt) openLinkPortal(link);
+  else jumpToLink(link);
+}
+
+function jumpToLink(link) {
+  if (!link) return;
+  pushLinkBack();
+  const to = Array.isArray(link.to) ? link.to.map(Number) : null;
+  if (to && Number.isFinite(to[0]) && Number.isFinite(to[1])) {
+    const rect = [to[0] - 14, to[1] - 14, to[0] + 14, to[1] + 14];
+    paper.scrollToBox(link.page, rect, { align: 0.32 });
+    paper.flashRegion(link.page, rect);
+  } else {
+    paper.scrollToPage(link.page);
+  }
+}
+
+function pushLinkBack() {
+  linkBack = [...linkBack, { page: paper.getCurrentPage(), scrollTop: paper.getScrollTop() }];
+  updateBackPill();
+}
+
+function restoreLinkBack() {
+  if (!linkBack.length) return;
+  const point = linkBack[linkBack.length - 1];
+  linkBack = linkBack.slice(0, -1);
+  paper.scrollToPage(point.page);
+  paper.setScrollTop(point.scrollTop);
+  updateBackPill();
+}
+
+function updateBackPill() {
+  if (!els.backPill) return;
+  els.backPill.hidden = linkBack.length === 0;
+  els.backPill.textContent = linkBack.length > 1 ? `← 返回 (${linkBack.length})` : '← 返回';
+}
+
+function safeExternalUrl(uri) {
+  try {
+    const url = new URL(String(uri || ''));
+    if (['http:', 'https:', 'mailto:'].includes(url.protocol)) return url.href;
+  } catch (err) {
+    return null;
+  }
+  return null;
+}
+
+function openExternalLink(link) {
+  const url = safeExternalUrl(link?.uri);
+  if (!url) {
+    toast('这个链接不是可打开的网址', 'error');
+    return;
+  }
+  let opened = null;
+  try {
+    opened = window.open(url, '_blank', 'noopener');
+  } catch (err) {
+    opened = null;
+  }
+  if (!opened) toast(`浏览器拦截了新标签页：${url}`, 'error');
+}
+
+function openLinkPortal(link) {
+  if (!state.doc || !link) return;
+  portalLink = link;
+  els.linkPortal.hidden = false;
+  els.linkPortalTitle.textContent = `第 ${link.page || '?'} 页${link.text ? ` · ${String(link.text).slice(0, 48)}` : ''}`;
+  els.linkPortalImg.src = state.api.pageImageUrl(state.doc.id, link.page);
+  els.linkPortalImg.alt = `第 ${link.page} 页预览`;
+}
+
+function closeLinkPortal() {
+  portalLink = null;
+  if (!els.linkPortal) return;
+  els.linkPortal.hidden = true;
+  if (els.linkPortalImg) els.linkPortalImg.removeAttribute('src');
+}
+
+// ---------- 目录侧栏 ----------
+
+function openToc() {
+  if (!state.structure) {
+    toast('先打开一篇论文再看目录', 'error');
+    return;
+  }
+  renderToc();
+  tocOpen = true;
+  clearTimeout(tocTimer);
+  els.tocBackdrop.hidden = false;
+  els.tocPanel.hidden = false;
+  requestAnimationFrame(() => els.tocPanel.classList.add('toc-open'));
+}
+
+function closeToc() {
+  tocOpen = false;
+  clearTimeout(tocTimer);
+  els.tocPanel.classList.remove('toc-open');
+  els.tocBackdrop.hidden = true;
+  tocTimer = setTimeout(() => {
+    if (!tocOpen) els.tocPanel.hidden = true;
+  }, 200);
+}
+
+/** 目录跳转：滚到该节第一段并闪一下。 */
+function jumpToSection(section) {
+  if (!section) return;
+  const sections = state.structure?.sections || [];
+  const paras = state.structure?.paras || [];
+  const firstParaId =
+    (Array.isArray(section.paraIds) && section.paraIds[0]) ||
+    paras.find((p) => p.sectionId === section.id)?.id ||
+    '';
+  const targetPage =
+    Number(section.page) ||
+    Number(paras.find((p) => p.id === firstParaId)?.page) ||
+    paper.getCurrentPage();
+  paper.scrollToPage(targetPage);
+  if (firstParaId) {
+    // 等滚动/懒加载完成后再闪，避免闪在还没渲染的页上（flashPara 内部会自行等待）
+    setTimeout(() => paper.flashPara(firstParaId), 60);
+  }
+  closeToc();
+}
+
+function renderToc() {
+  const list = els.tocList;
+  if (!list) return;
+  list.innerHTML = '';
+  const sections = state.structure?.sections || [];
+  if (!sections.length) {
+    list.appendChild(h('div', 'toc-empty', '这篇论文没有可用的章节目录。'));
+    return;
+  }
+  for (const section of sections) {
+    const level = Math.min(6, Math.max(1, Number(section.level) || 1));
+    const item = document.createElement('button');
+    item.type = 'button';
+    item.className = `toc-item toc-l${level}`;
+    item.style.paddingLeft = `${8 + (level - 1) * 14}px`;
+    item.textContent = section.title || '（未命名章节）';
+    item.title = `${section.title || ''}（第 ${section.page || '?'} 页）`;
+    item.dataset.sectionId = section.id;
+    item.addEventListener('click', () => jumpToSection(section));
+    list.appendChild(item);
+  }
+}
+
+// ---------- 全文搜索 ----------
+
+function openSearch() {
+  if (!state.structure) {
+    toast('先打开一篇论文再搜索', 'error');
+    return;
+  }
+  searchState = { ...searchState, open: true };
+  els.searchBar.hidden = false;
+  const selected = state.sel?.text ? state.sel.text.slice(0, 80) : '';
+  if (selected && !els.searchInput.value) els.searchInput.value = selected;
+  els.searchInput.focus();
+  els.searchInput.select();
+  if (els.searchInput.value.trim()) runSearchNow();
+  else updateSearchUi();
+}
+
+function closeSearch({ clearQuery = false } = {}) {
+  clearTimeout(searchTimer);
+  searchState = { open: false, query: '', matches: [], index: -1 };
+  if (els.searchBar) els.searchBar.hidden = true;
+  if (clearQuery && els.searchInput) els.searchInput.value = '';
+  paper.clearSearch();
+  updateSearchUi();
+}
+
+function updateSearchUi() {
+  if (!els.searchCount) return;
+  const total = searchState.matches.length;
+  if (!searchState.query) {
+    els.searchCount.textContent = '输入关键词';
+    return;
+  }
+  if (!total) {
+    els.searchCount.textContent = '无结果';
+    return;
+  }
+  els.searchCount.textContent = `第 ${searchState.index + 1} 条 / 共 ${total} 条`;
+}
+
+function runSearchNow() {
+  if (!state.structure) return;
+  const query = els.searchInput.value.trim();
+  searchState = { ...searchState, query };
+  if (!query) {
+    searchState = { ...searchState, matches: [], index: -1 };
+    paper.clearSearch();
+    updateSearchUi();
+    return;
+  }
+  const matches = paper.searchParagraphs(state.structure.paras || [], query);
+  searchState = { ...searchState, matches, index: matches.length ? 0 : -1 };
+  paper.setSearchResults(matches, searchState.index);
+  updateSearchUi();
+  if (matches.length) void paper.searchJump(searchState.index);
+}
+
+function stepSearch(delta) {
+  const total = searchState.matches.length;
+  if (!total) return;
+  const next = (searchState.index + delta + total) % total;
+  searchState = { ...searchState, index: next };
+  paper.setSearchResults(searchState.matches, next);
+  updateSearchUi();
+  void paper.searchJump(next);
+}
+
+// ---------- 快捷键 ----------
+
+function isEditableTarget(target) {
+  if (!(target instanceof Element)) return false;
+  const el = target.closest('input, textarea, select, [contenteditable="true"], [contenteditable=""]');
+  return !!el;
+}
+
+function handleGlobalKeydown(event) {
+  if (event.defaultPrevented) return;
+  if (event.isComposing) return;
+  const action = paper.mapShortcut({
+    key: event.key,
+    metaKey: event.metaKey,
+    ctrlKey: event.ctrlKey,
+    shiftKey: event.shiftKey,
+    altKey: event.altKey,
+    editable: isEditableTarget(event.target),
+  });
+  if (!action) return;
+  switch (action) {
+    case 'search':
+      event.preventDefault();
+      openSearch();
+      break;
+    case 'zoom-in':
+      event.preventDefault();
+      applyZoom(paper.getZoom() + paper.ZOOM_STEP);
+      break;
+    case 'zoom-out':
+      event.preventDefault();
+      applyZoom(paper.getZoom() - paper.ZOOM_STEP);
+      break;
+    case 'zoom-reset':
+      event.preventDefault();
+      applyZoom(1);
+      break;
+    case 'scroll-down':
+      event.preventDefault();
+      paper.scrollByViewport(0.8);
+      break;
+    case 'scroll-up':
+      event.preventDefault();
+      paper.scrollByViewport(-0.8);
+      break;
+    case 'scroll-top':
+      event.preventDefault();
+      paper.scrollToTop();
+      break;
+    case 'scroll-bottom':
+      event.preventDefault();
+      paper.scrollToBottom();
+      break;
+    case 'prev-page':
+      event.preventDefault();
+      paper.goToAdjacentPage(-1);
+      break;
+    case 'next-page':
+      event.preventDefault();
+      paper.goToAdjacentPage(1);
+      break;
+    default:
+      return;
+  }
 }
 
 // ---------- 错误条 / toast / busy ----------

@@ -1,0 +1,43 @@
+{
+ "version": 1,
+ "items": [
+  {
+   "id": "a_fixture01",
+   "kind": "highlight",
+   "page": 1,
+   "rects": [
+    [
+     54,
+     300,
+     290,
+     314
+    ]
+   ],
+   "text": "The Transformer follows this overall architecture using stacked self-attention",
+   "note": "段落批注：Transformer 总览",
+   "color": "yellow",
+   "paraId": "p2",
+   "createdAt": "2026-10-22T07:20:00.000Z",
+   "updatedAt": "2026-10-22T07:20:00.000Z"
+  },
+  {
+   "id": "a_fixture02",
+   "kind": "highlight",
+   "page": 2,
+   "rects": [
+    [
+     54,
+     200,
+     300,
+     214
+    ]
+   ],
+   "text": "The decoder is also composed of a stack of six identical layers",
+   "note": "",
+   "color": "blue",
+   "paraId": "p6",
+   "createdAt": "2026-10-22T07:25:00.000Z",
+   "updatedAt": "2026-10-22T07:25:00.000Z"
+  }
+ ]
+}

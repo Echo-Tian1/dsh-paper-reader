@@ -17,6 +17,14 @@
       </div>
       <div class="topbar-right">
         <span class="region-shortcut" title="选中文字解释；Shift + 拖动框选公式 / 图区域">Shift+拖动 框选</span>
+        <button id="links-toggle" class="btn btn-toggle" type="button" aria-pressed="false" title="显示可点击链接热区（Alt/Option+点击始终可用）">链接</button>
+        <button id="toc-btn" class="btn toc-btn" type="button" title="目录">目录</button>
+        <button id="search-btn" class="icon-btn" type="button" title="全文搜索（⌘/Ctrl+F）" aria-label="全文搜索">⌕</button>
+        <div class="zoom-control" title="缩放（⌘/Ctrl + +/−/0；点百分比恢复 100%）">
+          <button id="zoom-out" class="icon-btn zoom-btn" type="button" aria-label="缩小">−</button>
+          <button id="zoom-label" class="zoom-label" type="button" title="点击恢复 100%">100%</button>
+          <button id="zoom-in" class="icon-btn zoom-btn" type="button" aria-label="放大">＋</button>
+        </div>
         <span id="page-indicator" class="page-indicator" title="当前页 / 总页数" hidden>1 / 1</span>
         <label class="select-wrap" title="最近论文">
           <select id="docs-select" class="docs-select" aria-label="最近论文" hidden></select>
@@ -25,6 +33,15 @@
         <input id="file-input" type="file" accept="application/pdf,.pdf" hidden>
       </div>
     </header>
+
+    <div id="search-bar" class="search-bar" hidden>
+      <span class="search-icon" aria-hidden="true">⌕</span>
+      <input id="search-input" class="search-input" type="search" placeholder="搜索全文（不区分大小写）" autocomplete="off" spellcheck="false" aria-label="全文搜索">
+      <span id="search-count" class="search-count">输入关键词</span>
+      <button id="search-prev" class="icon-btn" type="button" title="上一条（Shift+Enter）" aria-label="上一条">↑</button>
+      <button id="search-next" class="icon-btn" type="button" title="下一条（Enter）" aria-label="下一条">↓</button>
+      <button id="search-close" class="icon-btn" type="button" title="关闭（Esc）" aria-label="关闭搜索">×</button>
+    </div>
 
     <div id="errorbar" class="errorbar" hidden>
       <span id="error-text" class="error-text"></span>
@@ -53,6 +70,31 @@
           </div>
         </div>
 
+        <button id="back-pill" class="back-pill" type="button" hidden>← 返回</button>
+
+        <div id="toc-backdrop" class="toc-backdrop" hidden></div>
+        <aside id="toc-panel" class="toc-panel" hidden aria-label="目录">
+          <div class="toc-head">
+            <span class="toc-title">目录</span>
+            <button id="toc-close" class="icon-btn" type="button" aria-label="关闭目录">×</button>
+          </div>
+          <div id="toc-list" class="toc-list"></div>
+        </aside>
+
+        <aside id="link-portal" class="link-portal" hidden aria-label="链接目标预览">
+          <div class="link-portal-head">
+            <span id="link-portal-title" class="link-portal-title">目标页预览</span>
+            <button id="link-portal-close" class="icon-btn" type="button" aria-label="关闭预览">×</button>
+          </div>
+          <div class="link-portal-body">
+            <img id="link-portal-img" class="link-portal-img" alt="目标页预览">
+          </div>
+          <div class="link-portal-foot">
+            <button id="link-portal-open" class="btn btn-primary" type="button">在正文打开</button>
+            <span class="link-portal-hint">不改变当前阅读位置</span>
+          </div>
+        </aside>
+
         <div id="drop-overlay" class="drop-overlay" hidden>
           <div class="drop-card">
             <div class="drop-icon" aria-hidden="true">↓</div>
@@ -68,6 +110,7 @@
             <button id="tab-history" class="tab" type="button" role="tab" aria-selected="false">历史</button>
             <button id="tab-terms" class="tab" type="button" role="tab" aria-selected="false">术语</button>
             <button id="tab-docs" class="tab tab-doc" type="button" role="tab" aria-selected="false" title="论文库">论文库</button>
+            <button id="tab-notes" class="tab" type="button" role="tab" aria-selected="false">批注</button>
           </div>
           <button id="pane-close" class="icon-btn" type="button" aria-label="收起解释栏">×</button>
         </div>
@@ -87,6 +130,14 @@
           <div id="docs-list" class="docs-list"></div>
         </div>
 
+        <div id="pane-notes" class="pane-body" hidden>
+          <div class="terms-head">
+            <span class="terms-head-title">本论文批注</span>
+            <a id="notes-export" class="btn btn-ghost" href="#" download hidden>导出 .md</a>
+          </div>
+          <div id="notes-list" class="notes-list"></div>
+        </div>
+
         <div id="pane-terms" class="pane-body" hidden>
           <div class="terms-head">
             <span class="terms-head-title">本论文术语表</span>
@@ -103,6 +154,7 @@
   <div id="selection-toolbar" class="selection-toolbar" hidden>
     <button class="tb-btn tb-primary" type="button" data-act="explain">解释</button>
     <button class="tb-btn" type="button" data-act="translate">译本段</button>
+    <button class="tb-btn tb-highlight" type="button" data-act="highlight">高亮</button>
     <button class="tb-btn" type="button" data-act="copy">复制</button>
     <button class="tb-btn tb-cancel" type="button" data-act="cancel">取消</button>
   </div>
@@ -111,6 +163,25 @@
     <span class="tb-hint">框选区域</span>
     <button class="tb-btn tb-primary" type="button" data-region-act="explain">解释这块</button>
     <button class="tb-btn tb-cancel" type="button" data-region-act="cancel">取消</button>
+  </div>
+
+  <div id="anno-popover" class="anno-popover" hidden>
+    <div class="anno-pop-head">
+      <span class="anno-pop-title">批注</span>
+      <button id="anno-close" class="icon-btn" type="button" aria-label="关闭批注">×</button>
+    </div>
+    <div id="anno-quote" class="anno-quote"></div>
+    <textarea id="anno-note" class="anno-note" rows="3" placeholder="写点备注（可留空）"></textarea>
+    <div class="anno-foot">
+      <div id="anno-colors" class="anno-colors" role="group" aria-label="高亮颜色">
+        <button class="anno-color anno-color-btn-yellow" type="button" data-color="yellow" title="黄色" aria-label="黄色"></button>
+        <button class="anno-color anno-color-btn-green" type="button" data-color="green" title="绿色" aria-label="绿色"></button>
+        <button class="anno-color anno-color-btn-blue" type="button" data-color="blue" title="蓝色" aria-label="蓝色"></button>
+        <button class="anno-color anno-color-btn-pink" type="button" data-color="pink" title="粉色" aria-label="粉色"></button>
+      </div>
+      <span id="anno-status" class="anno-status"></span>
+      <button id="anno-delete" class="btn btn-ghost anno-delete" type="button">删除</button>
+    </div>
   </div>
 
   <div id="toast" class="toast" hidden></div>

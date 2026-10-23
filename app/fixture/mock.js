@@ -25,6 +25,7 @@ const uploadedDocs = [];
 const liveEntries = [];
 const liveTerms = new Map();
 let structureCache = null;
+let annotationCache = null;
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
@@ -441,6 +442,68 @@ export function createApi() {
     async getExplanations() {
       const payload = await getJSON('fixture/explanations.json');
       return { entries: [...liveEntries, ...(payload.entries || [])] };
+    },
+
+    async getLinks() {
+      return getJSON('fixture/links.json');
+    },
+
+    async getAnnotations() {
+      if (!annotationCache) {
+        const payload = await getJSON('fixture/annotations.json').catch(() => ({ items: [] }));
+        annotationCache = [...(payload.items || [])];
+      }
+      return { items: [...annotationCache] };
+    },
+
+    async createAnnotation(docId, body) {
+      if (!annotationCache) {
+        const payload = await getJSON('fixture/annotations.json').catch(() => ({ items: [] }));
+        annotationCache = [...(payload.items || [])];
+      }
+      const rects = (Array.isArray(body?.rects) ? body.rects : []).filter(
+        (r) => Array.isArray(r) && r.length === 4 && r.every((n) => Number.isFinite(Number(n)))
+      );
+      if (!rects.length) throw new Error('rects 为空或非法');
+      const now = new Date().toISOString();
+      const item = {
+        id: `a_${Date.now().toString(16)}`,
+        kind: body?.kind === 'note' ? 'note' : 'highlight',
+        page: Number(body?.page) || 1,
+        rects: rects.map((r) => r.map(Number)),
+        text: String(body?.text || ''),
+        note: String(body?.note || ''),
+        color: ['yellow', 'green', 'blue', 'pink'].includes(body?.color) ? body.color : 'yellow',
+        paraId: body?.paraId || '',
+        createdAt: now,
+        updatedAt: now,
+      };
+      annotationCache = [...annotationCache, item];
+      return { item };
+    },
+
+    async patchAnnotation(docId, annotationId, body) {
+      if (!annotationCache) annotationCache = [];
+      const idx = annotationCache.findIndex((a) => a.id === annotationId);
+      if (idx < 0) throw new Error('批注不存在');
+      const updated = {
+        ...annotationCache[idx],
+        ...(typeof body?.note === 'string' ? { note: body.note } : {}),
+        ...(['yellow', 'green', 'blue', 'pink'].includes(body?.color) ? { color: body.color } : {}),
+        updatedAt: new Date().toISOString(),
+      };
+      annotationCache = annotationCache.map((a) => (a.id === annotationId ? updated : a));
+      return { item: updated };
+    },
+
+    async deleteAnnotation(docId, annotationId) {
+      if (!annotationCache) annotationCache = [];
+      annotationCache = annotationCache.filter((a) => a.id !== annotationId);
+      return { ok: true };
+    },
+
+    notesMdUrl() {
+      return 'fixture/notes.md';
     },
 
     async getTerms() {

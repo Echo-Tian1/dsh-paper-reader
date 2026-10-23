@@ -5,9 +5,11 @@
 用法：
     python3 extract.py <source.pdf> <outDir>                  # 全量抽取
     python3 extract.py --region <pdf> <page> <x0,y0,x1,y1>    # 框选区域文字层（一次性，stdout 一行 JSON）
+    python3 extract.py --links-only <pdf> <outDir>            # 只回填 links.json（老文档惰性重建用）
 
 产物：
     <outDir>/structure.json      章节 / 段落 / 句子区间 / 页元数据（最后写，失败时不留“完整”假象）
+    <outDir>/links.json          PDF 链接（内部跳转 goto / 外链 uri），归一化后逐页列出
     <outDir>/pages/<n>.json      该页逐词坐标 [[x0,y0,x1,y1,word,paraId], ...]
     <outDir>/pages/<n>.png       该页 1.5x 渲染图（/media 路由直接读这里）
 
@@ -475,6 +477,56 @@ def build_sections(paras, toc, title):
     return sections
 
 
+def collect_links(page):
+    """归一化一页的 PDF 链接。
+
+    关键实测：Attention 论文的引用/图表链接在 PyMuPDF 里是 kind=4（LINK_NAMED），
+    但 page / to 已经被解析好，所以不能只认 LINK_GOTO：
+      - 有合法 page（0-based）→ goto（转 1-based），带 page / to / named；
+      - 有 uri → uri；
+      - 其余（launch / file / 无 page 的 named / LINK_NONE）一律过滤。
+    同一页按矩形面积从大到小排序（大块优先点）；text 取区域文字层（截断 120 字）。
+    """
+    links = []
+    for raw in page.get_links() or []:
+        source = raw.get("from")
+        if not source:
+            continue
+        try:
+            rect = [round(float(value), 2) for value in source]
+        except (TypeError, ValueError):
+            continue
+        page_index = raw.get("page")
+        has_page = isinstance(page_index, int) and page_index >= 0
+        uri = raw.get("uri")
+        if has_page:
+            item = {"rect": rect, "kind": "goto", "page": int(page_index) + 1}
+            target = raw.get("to")
+            if target is not None:
+                try:
+                    item["to"] = [round(float(target.x), 2), round(float(target.y), 2)]
+                except (AttributeError, TypeError, ValueError):
+                    pass
+            named = raw.get("nameddest") or raw.get("named")
+            if isinstance(named, str) and named.strip():
+                item["named"] = named.strip()
+            links.append(item)
+        elif isinstance(uri, str) and uri.strip():
+            links.append({"rect": rect, "kind": "uri", "uri": uri.strip()})
+        # 其它 kind（launch/named 无目标/LINK_NONE）不收录
+    for item in links:
+        try:
+            words = page.get_text("words", clip=fitz.Rect(item["rect"]))
+            item["text"] = " ".join(str(word[4]) for word in words).strip()[:120]
+        except Exception:
+            item["text"] = ""
+    links.sort(
+        key=lambda item: (item["rect"][2] - item["rect"][0]) * (item["rect"][3] - item["rect"][1]),
+        reverse=True,
+    )
+    return links
+
+
 def process_page(page, page_number):
     """抽取一页：返回 (page_meta, paragraphs, words, warnings)。
 
@@ -602,6 +654,50 @@ def write_json(file_path, payload):
     write_bytes_atomic(file_path, json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode("utf-8"))
 
 
+def links_only_cli(argv):
+    """--links-only：只重建 links.json（老文档惰性回填用），几十毫秒级，不重跑页图/切句。"""
+    if len(argv) != 4:
+        fail("py-error", "用法：python3 extract.py --links-only <source.pdf> <outDir>", 2)
+    source_path, out_dir = argv[2], argv[3]
+    if not os.path.isfile(source_path):
+        fail("bad-pdf", "文件不存在：%s" % source_path, 2)
+    try:
+        with open(source_path, "rb") as handle:
+            head = handle.read(5)
+    except OSError as exc:
+        fail("bad-pdf", "无法读取文件：%s" % exc, 2)
+    if head != b"%PDF-":
+        fail("bad-pdf", "不是 PDF 文件（缺少 %PDF- 魔数）", 2)
+    doc = None
+    try:
+        doc = fitz.open(source_path)
+        if doc.needs_pass:
+            fail("encrypted", "这是加密 PDF，无法抽取文字；请先解除密码再上传", 2)
+        page_count = int(doc.page_count)
+        if page_count <= 0:
+            fail("bad-pdf", "PDF 没有任何页面", 2)
+        pages = [{"n": page_index + 1, "links": collect_links(doc[page_index])} for page_index in range(page_count)]
+        os.makedirs(out_dir, exist_ok=True)
+        write_json(os.path.join(out_dir, "links.json"), {"version": 1, "pages": pages})
+        print(json.dumps({
+            "ok": True,
+            "pageCount": page_count,
+            "links": sum(len(page["links"]) for page in pages),
+        }, ensure_ascii=False))
+        sys.stdout.flush()
+        return 0
+    except SystemExit:
+        raise
+    except Exception as exc:
+        fail("py-error", "链接回填失败：%s: %s" % (type(exc).__name__, exc), 1)
+    finally:
+        if doc is not None:
+            try:
+                doc.close()
+            except Exception:
+                pass
+
+
 def region_cli(argv):
     """--region 子命令：一次性抽取某页矩形区域的文字层（无守护进程，单次 <1s）。"""
     if len(argv) != 5:
@@ -661,6 +757,8 @@ def region_cli(argv):
 def main(argv):
     if len(argv) >= 2 and argv[1] == "--region":
         return region_cli(argv)
+    if len(argv) >= 2 and argv[1] == "--links-only":
+        return links_only_cli(argv)
     if len(argv) != 3:
         fail("py-error", "用法：python3 extract.py <source.pdf> <outDir>", 2)
     source_path, out_dir = argv[1], argv[2]
@@ -690,6 +788,7 @@ def main(argv):
         os.makedirs(pages_dir, exist_ok=True)
 
         page_metas = []
+        links_pages = []
         paras = []
         warnings = []
         word_total = 0
@@ -700,6 +799,7 @@ def main(argv):
             meta, page_paras, page_words, columns, page_warnings = process_page(doc[page_index], page_number)
             warnings.extend(page_warnings)
             page_metas.append(meta)
+            links_pages.append({"n": page_number, "links": collect_links(doc[page_index])})
             base = len(paras)
             for offset, para in enumerate(page_paras):
                 para["id"] = "p%d" % (base + offset + 1)
@@ -759,6 +859,8 @@ def main(argv):
                 for para in paras
             ],
         }
+        # links.json 在 structure.json 之前写；structure 仍是“抽取完成”的最后标记
+        write_json(os.path.join(out_dir, "links.json"), {"version": 1, "pages": links_pages})
         write_json(os.path.join(out_dir, "structure.json"), structure)
 
         print(json.dumps({
@@ -767,6 +869,7 @@ def main(argv):
             "paras": len(paras),
             "sections": len(sections),
             "words": word_total,
+            "links": sum(len(page["links"]) for page in links_pages),
             "warnings": warnings,
         }, ensure_ascii=False))
         sys.stdout.flush()

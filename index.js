@@ -22,21 +22,32 @@ import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 import {
+  ANNOTATION_COLORS,
+  ANNOTATION_KINDS,
+  ANNOTATION_TEXT_LIMIT,
   PaperError,
+  appendAnnotation,
   countExplained,
+  deleteAnnotation,
   docPaths,
   isDocId,
+  linksPath,
+  newAnnotationId,
+  readAnnotations,
   readExplanations,
   readIndex,
   readPage,
+  readJson,
   readStructure,
   readTerms,
   readUiState,
+  renderNotesMarkdown,
   renderTermsMarkdown,
   storeDir,
+  updateAnnotation,
   updateUiState,
 } from './store.js'
-import { ingestBytes, ingestPath, probePython, readJsonBody, readRequestBody } from './ingest.js'
+import { extractLinksOnly, ingestBytes, ingestPath, probePython, readJsonBody, readRequestBody } from './ingest.js'
 import { serveExplain, serveRegion, serveTranslate } from './explain.js'
 
 const HERE = path.dirname(fileURLToPath(import.meta.url))
@@ -69,6 +80,8 @@ const MIME = {
 }
 
 const JSON_HEADERS = { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' }
+/** 批注请求体上限（text/note 各 4000 字，1MB 足够）。 */
+const ANNOTATION_BODY_LIMIT = 1024 * 1024
 
 function respondJson(res, status, payload) {
   const text = JSON.stringify(payload)
@@ -102,6 +115,33 @@ function maxBytesOf(config) {
   return Math.max(1, Number.isFinite(mb) ? mb : 80) * 1024 * 1024
 }
 
+/**
+ * 校验批注矩形：非空数组，每项 4 个数字且 x1 > x0、y1 > y0；坐标取到 0.01pt。
+ * @param {unknown} rects
+ * @returns {number[][]} 归一化后的矩形数组
+ */
+function validateAnnotationRects(rects) {
+  if (!Array.isArray(rects) || rects.length === 0) {
+    throw new PaperError('bad-request', 'rects 不能为空，且每个矩形必须是 4 个数字 [x0,y0,x1,y1]', 400)
+  }
+  return rects.map((rect, index) => {
+    if (!Array.isArray(rect) || rect.length !== 4 || rect.some(value => !Number.isFinite(Number(value)))) {
+      throw new PaperError('bad-request', `第 ${index + 1} 个矩形必须是 4 个数字 [x0,y0,x1,y1]`, 400)
+    }
+    const box = rect.map(Number)
+    if (box[2] <= box[0] || box[3] <= box[1]) {
+      throw new PaperError('bad-request', `第 ${index + 1} 个矩形必须满足 x1 > x0 且 y1 > y0`, 400)
+    }
+    return box.map(value => Math.round(value * 100) / 100)
+  })
+}
+
+/** RFC 5987 文件名编码（content-disposition 的 filename* 用，UTF-8''…）。 */
+function encodeFilename(value) {
+  return encodeURIComponent(String(value ?? '').replace(/[\r\n]+/g, ' ').trim() || 'paper')
+    .replace(/['()*]/g, char => `%${char.charCodeAt(0).toString(16).toUpperCase()}`)
+}
+
 function contentLength(req) {
   const raw = req.headers?.['content-length']
   const value = Number(raw)
@@ -133,6 +173,17 @@ export function createApp({ ctx, config = {}, env = process.env }) {
   const appDir = cfg.appDir ? path.resolve(cfg.appDir) : DEFAULT_APP_DIR
   const state = {
     probe: { ok: false, fitz: null, path: cfg.pythonPath, error: '探活尚未完成' },
+  }
+  /** links 惰性回填的 per-doc 串行队列：并发请求只跑一次 python，不互相覆盖。 */
+  const linksBackfillQueues = new Map()
+  function withLinksBackfillQueue(docId, task) {
+    const previous = linksBackfillQueues.get(docId) ?? Promise.resolve()
+    const next = previous.catch(() => {}).then(task)
+    linksBackfillQueues.set(docId, next)
+    next.finally(() => {
+      if (linksBackfillQueues.get(docId) === next) linksBackfillQueues.delete(docId)
+    }).catch(() => {})
+    return next
   }
   const ready = probePython(cfg.pythonPath)
     .then(result => {
@@ -318,6 +369,199 @@ export function createApp({ ctx, config = {}, env = process.env }) {
     res.end(buffer)
   }
 
+  /**
+   * GET /api/docs/<id>/links。
+   *
+   * P0 之前抽取的老文档没有 links.json：source.pdf 存在时**惰性回填**一次
+   * （extract.py --links-only，只重建 links，不重跑页图/切句），落盘后正常返回；
+   * 回填用 per-doc 串行队列 + 原子写，两个并发请求不会互相覆盖。
+   * 回填失败不 500：返回空 pages + warning，下次请求还会再试。
+   */
+  async function handleLinks(req, res, id) {
+    const structure = await readStructure(id, env)
+    if (!structure) throw new PaperError('not-found', `找不到文档：${id}`, 404)
+
+    const cached = async () => {
+      const payload = await readJson(linksPath(id, env), null)
+      return payload && Array.isArray(payload.pages) ? { version: 1, pages: payload.pages } : null
+    }
+    const existing = await cached()
+    if (existing) {
+      respondJson(res, 200, existing)
+      return
+    }
+
+    const paths = docPaths(id, env)
+    try {
+      await fsp.access(paths.source)
+    } catch {
+      // 没有原始 PDF（异常/老数据缺失）：保持原兼容行为，返回空 pages
+      respondJson(res, 200, { version: 1, pages: [] })
+      return
+    }
+
+    const result = await withLinksBackfillQueue(id, async () => {
+      const again = await cached()
+      if (again) return { payload: again, backfilled: false }
+      const startedAt = Date.now()
+      try {
+        await extractLinksOnly({
+          pythonPath: cfg.pythonPath,
+          pdfPath: paths.source,
+          outDir: paths.dir,
+          timeoutMs: cfg.extractTimeoutMs,
+        })
+        const payload = await cached()
+        if (payload) {
+          console.error(`[paper-reader] links 惰性回填完成：${id}（${Date.now() - startedAt}ms）`)
+          return { payload, backfilled: true }
+        }
+        return { payload: null, warning: 'links 回填后仍读不到结果' }
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error)
+        console.error(`[paper-reader] links 惰性回填失败：${id}：${message}`)
+        return { payload: null, warning: `links 回填失败：${message}` }
+      }
+    })
+
+    if (result.payload) {
+      respondJson(res, 200, result.backfilled ? { ...result.payload, backfilled: true } : result.payload)
+      return
+    }
+    respondJson(res, 200, { version: 1, pages: [], warning: result.warning ?? 'links 回填失败' })
+  }
+
+  async function requireStructure(id) {
+    const structure = await readStructure(id, env)
+    if (!structure) throw new PaperError('not-found', `找不到文档：${id}`, 404)
+    return structure
+  }
+
+  /** GET /api/docs/<id>/annotations → { items } */
+  async function handleAnnotationsGet(req, res, id) {
+    await requireStructure(id)
+    respondJson(res, 200, { items: await readAnnotations(id, env) })
+  }
+
+  /** POST /api/docs/<id>/annotations → { item }（id 由宿主生成，客户端不传） */
+  async function handleAnnotationsPost(req, res, id) {
+    const structure = await requireStructure(id)
+    const body = await readJsonBody(req, ANNOTATION_BODY_LIMIT)
+    if (!body || typeof body !== 'object' || Array.isArray(body)) {
+      throw new PaperError('bad-request', '批注请求体必须是 JSON 对象', 400)
+    }
+    const kind = body.kind === undefined ? 'highlight' : String(body.kind)
+    if (!ANNOTATION_KINDS.includes(kind)) {
+      throw new PaperError('bad-request', `kind 只能是 ${ANNOTATION_KINDS.join(' / ')}`, 400)
+    }
+    const page = Number(body.page)
+    const pageCount = Number(structure.pageCount) || (structure.pages?.length ?? 0)
+    if (!Number.isInteger(page) || page < 1 || page > pageCount) {
+      throw new PaperError('bad-request', `页码超出范围：page 必须是 1..${pageCount}`, 400)
+    }
+    const rects = validateAnnotationRects(body.rects)
+    const text = body.text === undefined || body.text === null ? '' : String(body.text)
+    if (text.length > ANNOTATION_TEXT_LIMIT) {
+      throw new PaperError('bad-request', `text 过长（上限 ${ANNOTATION_TEXT_LIMIT} 字）`, 400)
+    }
+    const note = body.note === undefined || body.note === null ? '' : String(body.note)
+    if (note.length > ANNOTATION_TEXT_LIMIT) {
+      throw new PaperError('bad-request', `note 过长（上限 ${ANNOTATION_TEXT_LIMIT} 字）`, 400)
+    }
+    const color = body.color === undefined ? 'yellow' : String(body.color)
+    if (!ANNOTATION_COLORS.includes(color)) {
+      throw new PaperError('bad-request', `color 只能是 ${ANNOTATION_COLORS.join(' / ')}`, 400)
+    }
+    const now = new Date().toISOString()
+    const item = {
+      id: newAnnotationId(),
+      kind,
+      page,
+      rects,
+      text,
+      note,
+      color,
+      paraId: typeof body.paraId === 'string' ? body.paraId : '',
+      createdAt: now,
+      updatedAt: now,
+    }
+    await appendAnnotation(id, item, env)
+    respondJson(res, 200, { item })
+  }
+
+  /** PATCH /api/docs/<id>/annotations/<aid> → { item }；只允许改 note / color。 */
+  async function handleAnnotationPatch(req, res, id, aid) {
+    await requireStructure(id)
+    const body = await readJsonBody(req, ANNOTATION_BODY_LIMIT)
+    if (!body || typeof body !== 'object' || Array.isArray(body)) {
+      throw new PaperError('bad-request', 'PATCH 请求体必须是 JSON 对象', 400)
+    }
+    const patch = {}
+    if (Object.prototype.hasOwnProperty.call(body, 'note')) {
+      const note = body.note === null ? '' : String(body.note)
+      if (note.length > ANNOTATION_TEXT_LIMIT) {
+        throw new PaperError('bad-request', `note 过长（上限 ${ANNOTATION_TEXT_LIMIT} 字）`, 400)
+      }
+      patch.note = note
+    }
+    if (Object.prototype.hasOwnProperty.call(body, 'color')) {
+      const color = String(body.color)
+      if (!ANNOTATION_COLORS.includes(color)) {
+        throw new PaperError('bad-request', `color 只能是 ${ANNOTATION_COLORS.join(' / ')}`, 400)
+      }
+      patch.color = color
+    }
+    if (Object.keys(patch).length === 0) {
+      throw new PaperError('bad-request', 'PATCH 只支持 note / color 两个字段', 400)
+    }
+    respondJson(res, 200, { item: await updateAnnotation(id, aid, patch, env) })
+  }
+
+  /** DELETE /api/docs/<id>/annotations/<aid> → { ok:true }；不存在 404。 */
+  async function handleAnnotationDelete(req, res, id, aid) {
+    await requireStructure(id)
+    await deleteAnnotation(id, aid, env)
+    respondJson(res, 200, { ok: true })
+  }
+
+  async function handleNotesMarkdown(req, res, id) {
+    const structure = await requireStructure(id)
+    const docs = await readIndex(env)
+    const doc = docs.find(item => item.id === id) ?? { title: structure.title, addedAt: null }
+    const annotations = await readAnnotations(id, env)
+    const terms = await readTerms(id, env)
+    const explanationCount = (await readExplanations(id, env)).length
+    const markdown = renderNotesMarkdown({ doc, structure, annotations, terms, explanationCount })
+    const buffer = Buffer.from(markdown, 'utf8')
+    const filename = `${encodeFilename(doc.title || structure.title || 'paper')}-notes.md`
+    res.writeHead(200, {
+      'content-type': 'text/markdown; charset=utf-8',
+      'cache-control': 'no-store',
+      'content-disposition': `attachment; filename="notes.md"; filename*=UTF-8''${filename}`,
+      'content-length': buffer.length,
+    })
+    res.end(buffer)
+  }
+
+  /** GET /api/docs/<id>/file：原样回传上传时的 PDF（不重新生成）。 */
+  async function handleFile(req, res, id) {
+    const structure = await requireStructure(id)
+    let buffer
+    try {
+      buffer = await fsp.readFile(docPaths(id, env).source)
+    } catch {
+      throw new PaperError('not-found', '找不到原始 PDF 文件', 404)
+    }
+    const filename = `${encodeFilename(structure.title || 'paper')}.pdf`
+    res.writeHead(200, {
+      'content-type': 'application/pdf',
+      'cache-control': 'no-store',
+      'content-disposition': `inline; filename="paper.pdf"; filename*=UTF-8''${filename}`,
+      'content-length': buffer.length,
+    })
+    res.end(buffer)
+  }
+
   async function handleApp(req, res, pathname) {
     let relative = pathname.slice('/app'.length)
     if (relative === '' || relative === '/') relative = '/index.html'
@@ -400,6 +644,33 @@ export function createApp({ ctx, config = {}, env = process.env }) {
     if (media) {
       if (method !== 'GET') return methodNotAllowed(res, method)
       return handleMedia(req, res, media[1], Number(media[2]))
+    }
+    const annotationsItem = /^\/api\/docs\/([0-9a-f]{16})\/annotations\/(a_[0-9a-f]{12})$/.exec(pathname)
+    if (annotationsItem) {
+      if (method === 'PATCH') return handleAnnotationPatch(req, res, annotationsItem[1], annotationsItem[2])
+      if (method === 'DELETE') return handleAnnotationDelete(req, res, annotationsItem[1], annotationsItem[2])
+      return methodNotAllowed(res, method)
+    }
+    const annotations = /^\/api\/docs\/([0-9a-f]{16})\/annotations$/.exec(pathname)
+    if (annotations) {
+      if (method === 'GET') return handleAnnotationsGet(req, res, annotations[1])
+      if (method === 'POST') return handleAnnotationsPost(req, res, annotations[1])
+      return methodNotAllowed(res, method)
+    }
+    const links = /^\/api\/docs\/([0-9a-f]{16})\/links$/.exec(pathname)
+    if (links) {
+      if (method !== 'GET') return methodNotAllowed(res, method)
+      return handleLinks(req, res, links[1])
+    }
+    const notes = /^\/api\/docs\/([0-9a-f]{16})\/notes\.md$/.exec(pathname)
+    if (notes) {
+      if (method !== 'GET') return methodNotAllowed(res, method)
+      return handleNotesMarkdown(req, res, notes[1])
+    }
+    const file = /^\/api\/docs\/([0-9a-f]{16})\/file$/.exec(pathname)
+    if (file) {
+      if (method !== 'GET') return methodNotAllowed(res, method)
+      return handleFile(req, res, file[1])
     }
     const termsMd = /^\/api\/docs\/([0-9a-f]{16})\/terms\.md$/.exec(pathname)
     if (termsMd) {

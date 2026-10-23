@@ -269,6 +269,7 @@ let deps = {
   ensurePageImage: () => Promise.resolve(false),
   onTermJump: null,
   onJumpEntry: null,
+  onAnnotationJump: null,
   onEntrySaved: null,
   toast: () => {},
   embedded: false,
@@ -284,6 +285,8 @@ let historyEntries = null;
 let historyLoading = false;
 let terms = null;
 let termsLoading = false;
+let notes = null;
+let notesLoading = false;
 let activeTab = 'current';
 let abortController = null;
 let answerRenderQueued = false;
@@ -331,6 +334,10 @@ export function init(options = {}) {
     paneDocs: document.getElementById('pane-docs'),
     tabDocs: document.getElementById('tab-docs'),
     docsList: document.getElementById('docs-list'),
+    paneNotes: document.getElementById('pane-notes'),
+    tabNotes: document.getElementById('tab-notes'),
+    notesList: document.getElementById('notes-list'),
+    notesExport: document.getElementById('notes-export'),
     termsList: document.getElementById('terms-list'),
     termsExport: document.getElementById('terms-export'),
   };
@@ -342,6 +349,7 @@ export function init(options = {}) {
       if (!tab) return;
       if (tab.id === 'tab-history') showTab('history');
       else if (tab.id === 'tab-terms') showTab('terms');
+      else if (tab.id === 'tab-notes') showTab('notes');
       else if (tab.id === 'tab-docs') showTab('docs');
       else if (tab.id === 'tab-current') showTab('current');
     });
@@ -349,6 +357,7 @@ export function init(options = {}) {
     dom.tabCurrent?.addEventListener('click', () => showTab('current'));
     dom.tabHistory?.addEventListener('click', () => showTab('history'));
     dom.tabTerms?.addEventListener('click', () => showTab('terms'));
+    dom.tabNotes?.addEventListener('click', () => showTab('notes'));
   }
   if (!dom.paneTerms) deps.toast?.('术语页签缺失：页面与脚本版本不一致，请刷新', 'error');
   renderThread();
@@ -367,8 +376,11 @@ export function reset(id, structureData) {
   historyLoading = false;
   terms = null;
   termsLoading = false;
+  notes = null;
+  notesLoading = false;
   renderThread();
   updateTermsExport();
+  updateNotesExport();
   if (docId) loadTerms(true);
   showTab('current', { force: true });
 }
@@ -483,29 +495,43 @@ export function invalidateTerms() {
   if (activeTab === 'terms') loadTerms(true);
 }
 
+/** 批注数据失效（新增/修改/删除后调用）；若当前在批注 tab 则原地刷新。 */
+export function invalidateAnnotations() {
+  notes = null;
+  if (activeTab === 'notes') loadNotes(true);
+}
+
 export function showTab(tab, { force = false } = {}) {
-  const known = ['current', 'history', 'terms', 'docs'];
+  const known = ['current', 'history', 'terms', 'docs', 'notes'];
   activeTab = known.includes(tab) ? tab : 'current';
   const isCurrent = activeTab === 'current';
   const isHistory = activeTab === 'history';
   const isTerms = activeTab === 'terms';
   const isDocs = activeTab === 'docs';
+  const isNotes = activeTab === 'notes';
   dom.paneCurrent.hidden = !isCurrent;
   dom.paneHistory.hidden = !isHistory;
   if (dom.paneTerms) dom.paneTerms.hidden = !isTerms;
   if (dom.paneDocs) dom.paneDocs.hidden = !isDocs;
+  if (dom.paneNotes) dom.paneNotes.hidden = !isNotes;
   dom.tabCurrent.classList.toggle('active', isCurrent);
   dom.tabHistory.classList.toggle('active', isHistory);
   if (dom.tabTerms) dom.tabTerms.classList.toggle('active', isTerms);
   if (dom.tabDocs) dom.tabDocs.classList.toggle('active', isDocs);
+  if (dom.tabNotes) dom.tabNotes.classList.toggle('active', isNotes);
   dom.tabCurrent.setAttribute('aria-selected', String(isCurrent));
   dom.tabHistory.setAttribute('aria-selected', String(isHistory));
   if (dom.tabTerms) dom.tabTerms.setAttribute('aria-selected', String(isTerms));
   if (dom.tabDocs) dom.tabDocs.setAttribute('aria-selected', String(isDocs));
+  if (dom.tabNotes) dom.tabNotes.setAttribute('aria-selected', String(isNotes));
   if (isHistory) renderHistory();
   if (isTerms) {
     renderTerms();
     loadTerms(false);
+  }
+  if (isNotes) {
+    renderNotes();
+    loadNotes(false);
   }
   if (isDocs && typeof deps.renderDocs === 'function') deps.renderDocs();
   if (force && !isCurrent) {
@@ -1213,6 +1239,89 @@ async function loadTerms(force) {
   } finally {
     termsLoading = false;
     if (activeTab === 'terms') renderTerms();
+  }
+}
+
+// ---------- 批注 tab ----------
+
+function updateNotesExport() {
+  const link = dom?.notesExport;
+  if (!link) return;
+  if (!docId || typeof deps.api?.notesMdUrl !== 'function') {
+    link.hidden = true;
+    link.removeAttribute('href');
+    return;
+  }
+  const meta = deps.getDocMeta ? deps.getDocMeta() : {};
+  const safeTitle = String(meta.title || '批注')
+    .replace(/[\\/:*?"<>|\n\r]/g, '_')
+    .slice(0, 80);
+  link.hidden = false;
+  link.href = deps.api.notesMdUrl(docId);
+  link.setAttribute('download', `${safeTitle}-批注与术语.md`);
+  link.title = '导出批注 + 术语表（Markdown）';
+}
+
+function renderNotes() {
+  const list = dom?.notesList;
+  if (!list) return;
+  list.innerHTML = '';
+  updateNotesExport();
+  if (!docId) {
+    list.appendChild(h('div', 'notes-empty', '打开一篇论文后，这里会列出它的高亮与批注。'));
+    return;
+  }
+  if (notesLoading || notes === null) {
+    list.appendChild(h('div', 'notes-empty', '正在加载批注…'));
+    loadNotes(false);
+    return;
+  }
+  if (!notes.length) {
+    list.appendChild(
+      h('div', 'notes-empty', '还没有批注。选中文字后点工具条的「高亮」，可以在原文上留标记并写备注。')
+    );
+    return;
+  }
+  const sorted = [...notes].sort(
+    (a, b) => (Number(a.page) || 0) - (Number(b.page) || 0) || String(a.createdAt || '').localeCompare(String(b.createdAt || ''))
+  );
+  for (const item of sorted) {
+    const node = h('button', 'notes-item');
+    node.type = 'button';
+    node.dataset.id = item.id;
+    const top = h('div', 'notes-item-top');
+    top.appendChild(h('span', `notes-color notes-color-${item.color || 'yellow'}`));
+    top.appendChild(h('span', 'notes-page', `第 ${item.page || '?'} 页`));
+    top.appendChild(h('span', 'notes-kind', '高亮'));
+    node.appendChild(top);
+    node.appendChild(h('div', 'notes-quote', item.text || '（无摘录）'));
+    if (item.note) node.appendChild(h('div', 'notes-note', item.note));
+    node.addEventListener('click', () => {
+      if (deps.onAnnotationJump) deps.onAnnotationJump(item);
+    });
+    list.appendChild(node);
+  }
+}
+
+async function loadNotes(force) {
+  if (!docId || !deps.api || typeof deps.api.getAnnotations !== 'function') return;
+  if (notesLoading) return;
+  if (notes !== null && !force) {
+    renderNotes();
+    return;
+  }
+  notesLoading = true;
+  notes = null;
+  renderNotes();
+  try {
+    const res = await deps.api.getAnnotations(docId);
+    notes = Array.isArray(res?.items) ? res.items : [];
+  } catch (err) {
+    notes = [];
+    deps.toast?.(`批注加载失败：${err.message || err}`, 'error');
+  } finally {
+    notesLoading = false;
+    if (activeTab === 'notes') renderNotes();
   }
 }
 

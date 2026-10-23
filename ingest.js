@@ -169,6 +169,20 @@ export function runExtract({ pythonPath, pdfPath, outDir, timeoutMs = 120_000 })
 }
 
 /**
+ * 链接回填：extract.py --links-only <pdf> <outDir>，只重建 links.json（不重跑页图/切句）。
+ * 老文档惰性回填用；实测夹具约 0.14s。
+ * @returns {Promise<{pageCount:number,links:number}>}
+ */
+export function extractLinksOnly({ pythonPath, pdfPath, outDir, timeoutMs = 120_000 }) {
+  return runPythonJson({
+    pythonPath: pythonPath || 'python3',
+    args: [EXTRACT_SCRIPT, '--links-only', pdfPath, outDir],
+    timeoutMs,
+    label: '链接回填',
+  })
+}
+
+/**
  * 框选区域文字层：extract.py --region <pdf> <page> <x0,y0,x1,y1>（一次性子进程，无守护）。
  * @returns {Promise<{page:number,rect:number[],hasText:boolean,text:string}>}
  */

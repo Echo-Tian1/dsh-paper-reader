@@ -53,6 +53,7 @@ export function selectionActionState(info) {
   return {
     explain: hasText,
     translate: hasText && hasPara,
+    highlight: hasText,
     copy: hasText,
     cancel: true,
   };
@@ -291,7 +292,186 @@ export function regionSizeLabel(rect) {
   return `${Math.round(r[2] - r[0])}×${Math.round(r[3] - r[1])} pt`;
 }
 
+// ---------- P0 纯函数：缩放 / 快捷键 ----------
+
+export const ZOOM_MIN = 0.7;
+export const ZOOM_MAX = 2;
+export const ZOOM_STEP = 0.1;
+
+/** 缩放系数归一化：70%–200%，步进 10%，非法值回落到 100%。 */
+export function clampZoom(value) {
+  const n = Number(value);
+  if (!Number.isFinite(n)) return 1;
+  const snapped = Math.round(n * 10) / 10;
+  return Math.min(ZOOM_MAX, Math.max(ZOOM_MIN, snapped));
+}
+
+export function zoomLabel(value) {
+  return `${Math.round(clampZoom(value) * 100)}%`;
+}
+
+/**
+ * 键盘快捷键映射（纯函数，便于单测）。
+ * - ⌘/Ctrl + F → 搜索；⌘/Ctrl + +/-/0 → 缩放
+ * - j/k 上下滚动、g/G 顶部/底部、[ ] 上一页/下一页
+ * - 输入框聚焦（editable）时全部禁用；Alt 组合键留给「链接跳转」等，不拦截。
+ */
+export function mapShortcut(input = {}) {
+  const { key, metaKey = false, ctrlKey = false, shiftKey = false, altKey = false, editable = false } = input;
+  if (!key || editable) return null;
+  const cmd = metaKey || ctrlKey;
+  if (cmd) {
+    if (key === 'f' || key === 'F') return 'search';
+    if (key === '+' || key === '=') return 'zoom-in';
+    if (key === '-' || key === '_') return 'zoom-out';
+    if (key === '0') return 'zoom-reset';
+    return null;
+  }
+  if (altKey) return null;
+  switch (key) {
+    case 'j':
+      return 'scroll-down';
+    case 'k':
+      return 'scroll-up';
+    case 'g':
+      return shiftKey ? 'scroll-bottom' : 'scroll-top';
+    case 'G':
+      return 'scroll-bottom';
+    case '[':
+      return 'prev-page';
+    case ']':
+      return 'next-page';
+    default:
+      return null;
+  }
+}
+
+// ---------- P0 纯函数：全文搜索 ----------
+
+/**
+ * 在段落文本里做不区分大小写搜索。
+ * 返回 [{paraId, page, start, end, text}]，按段落顺序、段内位置排序。
+ * maxResults 防止单字母搜索把结果撑爆（默认 500）。
+ */
+export function searchParagraphs(paras, query, maxResults = 500) {
+  const q = String(query == null ? '' : query).trim();
+  if (!q) return [];
+  const needle = q.toLowerCase();
+  const limit = Number.isFinite(maxResults) && maxResults > 0 ? maxResults : 500;
+  const out = [];
+  for (const para of paras || []) {
+    const text = String(para?.text || '');
+    if (!text) continue;
+    const lower = text.toLowerCase();
+    let from = 0;
+    while (from <= lower.length && out.length < limit) {
+      const at = lower.indexOf(needle, from);
+      if (at < 0) break;
+      out.push({
+        paraId: para.id || '',
+        page: Number(para.page) || 1,
+        start: at,
+        end: at + needle.length,
+        text: text.slice(at, at + needle.length),
+      });
+      from = at + Math.max(1, needle.length);
+    }
+    if (out.length >= limit) break;
+  }
+  return out;
+}
+
+// ---------- P0 纯函数：链接热区命中 ----------
+
+/**
+ * 在某一页的链接里找包含 (x,y) 的热区（坐标均为 PDF 点，原点左上）。
+ * linksByPage 形如 { 3: [ {rect:[x0,y0,x1,y1], kind, page?, uri?, text} ] }。
+ * 重叠时取后出现的一个（DOM 顺序上后画的在上）。
+ */
+export function linkAtPoint(linksByPage, pageNumber, x, y) {
+  const links = linksByPage && linksByPage[Number(pageNumber)];
+  if (!Array.isArray(links) || !links.length) return null;
+  for (let i = links.length - 1; i >= 0; i--) {
+    const link = links[i];
+    const rect = link && Array.isArray(link.rect) ? link.rect : null;
+    if (!rect || rect.length !== 4) continue;
+    const nums = rect.map(Number);
+    if (!nums.every((n) => Number.isFinite(n))) continue;
+    const x0 = Math.min(nums[0], nums[2]);
+    const y0 = Math.min(nums[1], nums[3]);
+    const x1 = Math.max(nums[0], nums[2]);
+    const y1 = Math.max(nums[1], nums[3]);
+    if (x >= x0 && x <= x1 && y >= y0 && y <= y1) return link;
+  }
+  return null;
+}
+
+// ---------- P0 纯函数：高亮矩形合并 / 批注命中 ----------
+
+export const ANNOTATION_COLORS = ['yellow', 'green', 'blue', 'pink'];
+
+/** 颜色名归一化（未知色回退 yellow）。 */
+export function normalizeAnnotationColor(color) {
+  return ANNOTATION_COLORS.includes(color) ? color : 'yellow';
+}
+
+export function annotationColorClass(color) {
+  return `anno-color-${normalizeAnnotationColor(color)}`;
+}
+
+/**
+ * 把一组词级矩形按行合并成每行一个大矩形（PDF 点坐标）。
+ * 输入 [{left,top,width,height}]，返回 [[x0,y0,x1,y1], ...]，按行从上到下、行内从左到右。
+ */
+export function mergeLineRects(boxes) {
+  const list = (Array.isArray(boxes) ? boxes : [])
+    .filter((b) => b && [b.left, b.top, b.width, b.height].every((n) => Number.isFinite(Number(n))))
+    .map((b) => ({
+      left: Number(b.left),
+      top: Number(b.top),
+      width: Math.max(0.5, Number(b.width)),
+      height: Math.max(0.5, Number(b.height)),
+    }))
+    .sort((a, b) => a.top - b.top || a.left - b.left);
+  const lines = [];
+  for (const box of list) {
+    const last = lines[lines.length - 1];
+    const sameLine = last && Math.abs(box.top - last.top) <= Math.max(2, Math.min(box.height, last.height) * 0.4);
+    if (sameLine) {
+      const x0 = Math.min(last.left, box.left);
+      const y0 = Math.min(last.top, box.top);
+      const x1 = Math.max(last.left + last.width, box.left + box.width);
+      const y1 = Math.max(last.top + last.height, box.top + box.height);
+      last.left = x0;
+      last.top = y0;
+      last.width = x1 - x0;
+      last.height = y1 - y0;
+    } else {
+      lines.push({ ...box });
+    }
+  }
+  return lines
+    .map((l) => normalizeRegionRect([l.left, l.top, l.left + l.width, l.top + l.height]))
+    .filter(Boolean);
+}
+
+/** 在批注列表里找包含 (x,y) 的批注（PDF 点；重叠时取后添加的）。 */
+export function annotationAtPoint(items, pageNumber, x, y) {
+  const list = Array.isArray(items) ? items : [];
+  for (let i = list.length - 1; i >= 0; i--) {
+    const item = list[i];
+    if (!item || Number(item.page) !== Number(pageNumber) || !Array.isArray(item.rects)) continue;
+    for (const rect of item.rects) {
+      const r = normalizeRegionRect(rect);
+      if (!r) continue;
+      if (x >= r[0] && x <= r[2] && y >= r[1] && y <= r[3]) return item;
+    }
+  }
+  return null;
+}
+
 // ---------- 模块状态 ----------
+
 
 let deps = {
   api: null,
@@ -300,6 +480,8 @@ let deps = {
   onOpenEntry: null,
   onPageChange: null,
   onRegionChange: null,
+  onLinkActivate: null,
+  onOpenAnnotation: null,
   toast: null,
 };
 
@@ -321,6 +503,14 @@ let pendingFlash = null;
 let pendingTerm = null;
 let region = null; // { page, pageEntry, rect, client }
 let regionDrag = null; // { pageEntry, start, lastRect, tooSmall }
+let zoom = 1; // 手动缩放系数（叠加在自适应宽度上）
+let zoomRestore = null; // 缩放前记下的阅读锚点，缩放后恢复
+let searchMatches = [];
+let searchIndex = -1;
+let searchToken = 0;
+let linksByPage = {};
+let linksEnabled = false;
+let annotations = [];
 
 const scaleQueued = { value: false };
 
@@ -332,6 +522,8 @@ export function init(options = {}) {
   contentEl = options.contentEl || options.scrollEl;
   if (contentEl) {
     contentEl.addEventListener('dblclick', onDoubleClick);
+    contentEl.addEventListener('click', onLinkClickCapture, true);
+    contentEl.addEventListener('click', onAnnotationClickCapture, true);
   }
   if (scrollEl) {
     scrollEl.addEventListener('scroll', onScroll, { passive: true });
@@ -361,6 +553,8 @@ export async function load({ docId: id, structure: data, restore } = {}) {
   pendingTerm = null;
   if (regionDrag) endRegionDrag();
   region = null;
+  linksByPage = {};
+  annotations = [];
   lastPage = 0;
   contentEl.innerHTML = '';
 
@@ -387,10 +581,16 @@ export async function load({ docId: id, structure: data, restore } = {}) {
     const textLayer = document.createElement('div');
     textLayer.className = 'text-layer';
 
+    const annoLayer = document.createElement('div');
+    annoLayer.className = 'anno-layer';
+
+    const linksLayer = document.createElement('div');
+    linksLayer.className = 'links-layer';
+
     const marksLayer = document.createElement('div');
     marksLayer.className = 'marks-layer';
 
-    page.append(img, textLayer, marksLayer);
+    page.append(img, annoLayer, textLayer, linksLayer, marksLayer);
 
     const entry = {
       n: pageMeta.n,
@@ -400,7 +600,9 @@ export async function load({ docId: id, structure: data, restore } = {}) {
       wrap,
       page,
       img,
+      annoLayer,
       textLayer,
+      linksLayer,
       marksLayer,
       note: null,
       data: null,
@@ -507,14 +709,57 @@ function scheduleScale() {
 
 function applyScaleNow() {
   if (!scrollEl || !contentEl || !structure) return;
-  scaleTargetWidth = measureTargetWidth();
+  scaleTargetWidth = measureTargetWidth() * zoom;
   for (const page of pages) {
     const s = scaleTargetWidth / (page.w || 612);
     page.page.style.transform = `scale(${s})`;
     page.wrap.style.width = `${Math.round(scaleTargetWidth)}px`;
     page.wrap.style.height = `${Math.round((page.h || 792) * s)}px`;
   }
+  if (zoomRestore) restoreReadingAnchor();
   updateCurrentPage(true);
+}
+
+// ---------- 手动缩放（叠加在自适应宽度之上） ----------
+
+/** 当前缩放系数（1 = 100%）。 */
+export function getZoom() {
+  return zoom;
+}
+
+/** 设置缩放系数（70%–200%，10% 步进）；会尽量保持当前阅读位置。 */
+export function setZoom(value, { anchor = true } = {}) {
+  const next = clampZoom(value);
+  if (next === zoom) return zoom;
+  if (anchor) zoomRestore = captureReadingAnchor();
+  zoom = next;
+  scheduleScale();
+  return zoom;
+}
+
+/** 记录当前页 + 页内比例，缩放后按同一位置恢复（避免跳走）。 */
+function captureReadingAnchor() {
+  if (!scrollEl || !pages.length) return null;
+  const containerTop = scrollEl.getBoundingClientRect().top + 8;
+  for (const page of pages) {
+    const rect = page.wrap.getBoundingClientRect();
+    if (rect.bottom > containerTop) {
+      const ratio = Math.min(1, Math.max(0, (containerTop - rect.top) / Math.max(1, rect.height)));
+      return { page: page.n, ratio };
+    }
+  }
+  return { page: pages[0].n, ratio: 0 };
+}
+
+function restoreReadingAnchor() {
+  const anchor = zoomRestore;
+  zoomRestore = null;
+  if (!anchor || !scrollEl) return;
+  const page = pages.find((p) => p.n === anchor.page);
+  if (!page) return;
+  const wrapRect = page.wrap.getBoundingClientRect();
+  const top = wrapRect.top - scrollEl.getBoundingClientRect().top + scrollEl.scrollTop;
+  scrollEl.scrollTop = Math.max(0, top + anchor.ratio * wrapRect.height - 8);
 }
 
 function observePages() {
@@ -548,7 +793,9 @@ async function loadPage(page) {
     page.data = data || { n: page.n, words: [] };
     buildTextLayer(page);
     renderMarks(page);
+    renderAnnotations(page);
     page.loadState = 'loaded';
+    if (searchMatches.length) applySearchHighlights();
     if (pendingFlash) {
       const para = paraById.get(pendingFlash);
       if (para && para.page === page.n) {
@@ -587,6 +834,320 @@ function buildTextLayer(page) {
     fragment.appendChild(span);
   }
   page.textLayer.appendChild(fragment);
+}
+
+// ---------- 高亮 / 批注渲染 ----------
+
+/** 设置批注列表（不可变数组）；重画所有页。 */
+export function setAnnotations(items) {
+  annotations = Array.isArray(items) ? [...items] : [];
+  for (const page of pages) renderAnnotations(page);
+}
+
+export function getAnnotations() {
+  return [...annotations];
+}
+
+export function addAnnotation(item) {
+  if (!item) return;
+  const idx = annotations.findIndex((a) => a.id === item.id);
+  const next = idx >= 0 ? annotations.map((a) => (a.id === item.id ? item : a)) : [...annotations, item];
+  setAnnotations(next);
+}
+
+export function updateAnnotation(item) {
+  if (!item) return;
+  setAnnotations(annotations.map((a) => (a.id === item.id ? { ...a, ...item } : a)));
+}
+
+export function removeAnnotation(id) {
+  if (!id) return;
+  setAnnotations(annotations.filter((a) => a.id !== id));
+}
+
+function renderAnnotations(page) {
+  if (!page.annoLayer) return;
+  page.annoLayer.innerHTML = '';
+  for (const item of annotations) {
+    if (!item || Number(item.page) !== page.n || !Array.isArray(item.rects)) continue;
+    for (const rect of item.rects) {
+      const r = normalizeRegionRect(rect);
+      if (!r) continue;
+      const mark = document.createElement('div');
+      mark.className = `anno-mark ${annotationColorClass(item.color)}`;
+      mark.style.left = `${r[0]}px`;
+      mark.style.top = `${r[1]}px`;
+      mark.style.width = `${Math.max(1, r[2] - r[0])}px`;
+      mark.style.height = `${Math.max(1, r[3] - r[1])}px`;
+      mark.dataset.annotationId = item.id;
+      mark.title = item.note ? `${item.text || ''} · ${item.note}` : String(item.text || '点击查看批注');
+      page.annoLayer.appendChild(mark);
+    }
+  }
+}
+
+/** 点击高亮块 → 打开批注浮层。高亮不挡选词：用捕获阶段按坐标命中。 */
+function onAnnotationClickCapture(event) {
+  if (!event || event.altKey) return;
+  // 链接热区（开启「链接」时）优先：它是最上层的显式交互层
+  if (event.target instanceof Element && event.target.closest('.link-hotzone')) return;
+  const pageEntry = pageEntryFromElement(event.target);
+  if (!pageEntry) return;
+  // 如果刚刚拖出了文字选区，优先当作选区操作，不打开批注
+  const sel = typeof window !== 'undefined' ? window.getSelection() : null;
+  if (sel && !sel.isCollapsed && String(sel).trim()) return;
+  const point = clientToPdf(pageEntry.page, event.clientX, event.clientY, pageEntry.w, pageEntry.h);
+  const hit = annotationAtPoint(annotations, pageEntry.n, point.x, point.y);
+  if (!hit) return;
+  // 高亮优先于其它覆盖层（解释标记也在这片区域时，以批注为准）
+  event.stopPropagation();
+  deps.onOpenAnnotation?.(hit);
+}
+
+/** 跳转到批注：滚到该页高亮位置并闪一下。 */
+export function jumpToAnnotation(item) {
+  if (!item) return false;
+  const first = Array.isArray(item.rects) && item.rects.length ? normalizeRegionRect(item.rects[0]) : null;
+  scrollToPage(item.page);
+  if (first) {
+    scrollToBox(item.page, first, { align: 0.32 });
+    flashAnnotation(item.id);
+  }
+  return true;
+}
+
+/** 闪烁某条批注的高亮块（历史/批注列表跳转用）。 */
+export function flashAnnotation(id) {
+  if (!contentEl) return false;
+  const marks = contentEl.querySelectorAll(`.anno-mark[data-annotation-id="${cssEscape(id)}"]`);
+  if (!marks.length) return false;
+  for (const mark of marks) {
+    mark.classList.remove('anno-flash');
+    void mark.offsetWidth;
+    mark.classList.add('anno-flash');
+    setTimeout(() => mark.classList.remove('anno-flash'), 1400);
+  }
+  return true;
+}
+
+/** 返回某条批注首个矩形在屏幕上的位置（浮层定位用）。 */
+export function annotationScreenRect(item) {
+  if (!item || !Array.isArray(item.rects) || !item.rects.length) return null;
+  const page = pages.find((p) => p.n === Number(item.page));
+  const r = normalizeRegionRect(item.rects[0]);
+  if (!page || !r) return null;
+  const wrapRect = page.wrap.getBoundingClientRect();
+  const scale = wrapRect.width / (page.w || 612);
+  return {
+    left: wrapRect.left + r[0] * scale,
+    top: wrapRect.top + r[1] * scale,
+    width: (r[2] - r[0]) * scale,
+    height: (r[3] - r[1]) * scale,
+  };
+}
+
+/** 当前选区覆盖的词 bbox 合并成每行矩形（PDF 点）；没有选区返回 []。 */
+export function selectionRects(info) {
+  if (!info) return [];
+  const page = pages.find((p) => p.n === Number(info.page));
+  if (!page || page.loadState !== 'loaded') return [];
+  const sel = typeof window !== 'undefined' ? window.getSelection() : null;
+  if (!sel || !sel.rangeCount || sel.isCollapsed) return [];
+  const range = sel.getRangeAt(0);
+  const boxes = [];
+  for (const span of page.textLayer.querySelectorAll('span[data-wi]')) {
+    let intersects = false;
+    try {
+      intersects = range.intersectsNode(span);
+    } catch (err) {
+      intersects = false;
+    }
+    if (!intersects) continue;
+    const left = parseFloat(span.style.left);
+    const top = parseFloat(span.style.top);
+    const width = parseFloat(span.style.width);
+    const height = parseFloat(span.style.height);
+    if ([left, top, width, height].every((n) => Number.isFinite(n))) {
+      boxes.push({ left, top, width, height });
+    }
+  }
+  return mergeLineRects(boxes);
+}
+
+// ---------- 链接层（引用 / 图表 / URL） ----------
+
+/** 设置链接数据（不可变 payload：{pages:[{n,links:[...]}]}）；同时重画热区。 */
+export function setLinks(payload) {
+  const next = {};
+  const pagesData = Array.isArray(payload?.pages) ? payload.pages : [];
+  for (const page of pagesData) {
+    const n = Number(page?.n);
+    if (!n || !Array.isArray(page.links)) continue;
+    next[n] = page.links.filter((link) => link && Array.isArray(link.rect));
+  }
+  linksByPage = next;
+  for (const entry of pages) renderLinks(entry);
+}
+
+/** 顶栏「链接」开关：控制热区是否可点（Alt+点击不受影响）。 */
+export function setLinksEnabled(enabled) {
+  linksEnabled = !!enabled;
+  if (!contentEl) return;
+  contentEl.classList.toggle('links-enabled', linksEnabled);
+}
+
+export function getLinksEnabled() {
+  return linksEnabled;
+}
+
+export function getLinksForPage(pageNumber) {
+  return [...(linksByPage[Number(pageNumber)] || [])];
+}
+
+function renderLinks(pageEntry) {
+  const layer = pageEntry.linksLayer;
+  if (!layer) return;
+  layer.innerHTML = '';
+  const links = linksByPage[pageEntry.n] || [];
+  for (const link of links) {
+    const r = normalizeRegionRect(link.rect);
+    if (!r) continue;
+    const a = document.createElement('a');
+    a.className = 'link-hotzone';
+    a.href = 'javascript:void(0)';
+    a.title = link.text || (link.kind === 'uri' ? link.uri : `跳到第 ${link.page || '?'} 页`);
+    a.dataset.kind = link.kind || '';
+    if (link.page) a.dataset.page = String(link.page);
+    if (link.named) a.dataset.named = link.named;
+    a.style.left = `${r[0]}px`;
+    a.style.top = `${r[1]}px`;
+    a.style.width = `${Math.max(2, r[2] - r[0])}px`;
+    a.style.height = `${Math.max(2, r[3] - r[1])}px`;
+    a.addEventListener('click', (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+      deps.onLinkActivate?.(link, { alt: event.altKey });
+    });
+    layer.appendChild(a);
+  }
+}
+
+/** Alt/Option + 点击：即使链接热区没开（pointer-events:none）也能命中。 */
+function onLinkClickCapture(event) {
+  if (!event.altKey) return;
+  const pageEntry = pageEntryFromElement(event.target);
+  if (!pageEntry) return;
+  const point = clientToPdf(pageEntry.page, event.clientX, event.clientY, pageEntry.w, pageEntry.h);
+  const link = linkAtPoint(linksByPage, pageEntry.n, point.x, point.y);
+  if (!link) return;
+  event.preventDefault();
+  event.stopPropagation();
+  deps.onLinkActivate?.(link, { alt: true });
+}
+
+// ---------- 全文搜索：命中高亮 / 跳转 ----------
+
+function spansInCharRange(para, page, start, end) {
+  if (!para || !page || page.loadState !== 'loaded') return [];
+  const words = wordsForPara(page, para.id);
+  const aligned = alignWordOffsets(para.text, words);
+  const wanted = new Set();
+  for (let i = 0; i < words.length; i++) {
+    const range = aligned[i];
+    if (range && range[0] < end && range[1] > start) wanted.add(i);
+  }
+  const spans = [];
+  for (const span of page.textLayer.querySelectorAll('span[data-wi]')) {
+    if (wanted.has(Number(span.dataset.wi))) spans.push(span);
+  }
+  return spans;
+}
+
+/** 清掉页面上所有搜索高亮 class。 */
+function clearSearchHighlightDom() {
+  if (!contentEl) return;
+  for (const el of contentEl.querySelectorAll('.pr-search-hit, .pr-search-hit-current')) {
+    el.classList.remove('pr-search-hit', 'pr-search-hit-current');
+  }
+}
+
+/** 重画搜索高亮：已加载页上的所有命中标黄，当前命中加 current class。 */
+function applySearchHighlights() {
+  if (!contentEl) return;
+  clearSearchHighlightDom();
+  for (let i = 0; i < searchMatches.length; i++) {
+    const match = searchMatches[i];
+    const para = paraById.get(match.paraId);
+    const page = pages.find((p) => p.n === match.page);
+    if (!para || !page || page.loadState !== 'loaded') continue;
+    const spans = spansInCharRange(para, page, match.start, match.end);
+    for (const span of spans) {
+      span.classList.add('pr-search-hit');
+      if (i === searchIndex) span.classList.add('pr-search-hit-current');
+    }
+  }
+}
+
+/** 设置搜索结果（不可变数组），index 为当前第几条（0-based）。 */
+export function setSearchResults(matches, index = 0) {
+  searchMatches = Array.isArray(matches) ? [...matches] : [];
+  searchIndex = searchMatches.length ? Math.min(Math.max(0, Number(index) || 0), searchMatches.length - 1) : -1;
+  applySearchHighlights();
+}
+
+export function getSearchResults() {
+  return { matches: [...searchMatches], index: searchIndex };
+}
+
+export function clearSearch() {
+  searchMatches = [];
+  searchIndex = -1;
+  clearSearchHighlightDom();
+}
+
+/** 命中词在 PDF 点坐标系里的外接矩形（用于滚动定位）。 */
+export function searchMatchRect(match) {
+  if (!match) return null;
+  const para = paraById.get(match.paraId);
+  const page = pages.find((p) => p.n === match.page);
+  if (!para || !page || page.loadState !== 'loaded') return null;
+  const spans = spansInCharRange(para, page, match.start, match.end);
+  if (!spans.length) return para.bbox ? normalizeRegionRect(para.bbox) : null;
+  let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity;
+  for (const span of spans) {
+    const left = parseFloat(span.style.left) || 0;
+    const top = parseFloat(span.style.top) || 0;
+    const width = parseFloat(span.style.width) || 0;
+    const height = parseFloat(span.style.height) || 0;
+    x0 = Math.min(x0, left);
+    y0 = Math.min(y0, top);
+    x1 = Math.max(x1, left + width);
+    y1 = Math.max(y1, top + height);
+  }
+  return normalizeRegionRect([x0, y0, x1, y1]);
+}
+
+/**
+ * 跳到第 index 条命中：必要时先加载该页文字层，然后滚动到命中位置。
+ * 返回 match 或 null。
+ */
+export async function searchJump(index) {
+  if (!searchMatches.length) return null;
+  searchIndex = Math.min(Math.max(0, Number(index) || 0), searchMatches.length - 1);
+  const token = ++searchToken;
+  const match = searchMatches[searchIndex];
+  const para = paraById.get(match.paraId);
+  const page = pages.find((p) => p.n === match.page);
+  if (page && page.loadState !== 'loaded' && !page.hasText) page.loadState = 'loaded';
+  if (page && page.loadState !== 'loaded') {
+    await loadPage(page);
+  }
+  if (token !== searchToken) return match; // 已被更新的跳转覆盖
+  applySearchHighlights();
+  const rect = searchMatchRect(match);
+  if (page && rect) scrollToBox(page.n, rect, { align: 0.3 });
+  else if (page) scrollToPage(page.n);
+  return match;
 }
 
 // ---------- 标记 ----------
@@ -995,6 +1556,27 @@ export function scrollToPage(n) {
   return true;
 }
 
+/** 滚动到某页 PDF 点矩形附近（搜索命中 / 链接跳转用）。 */
+export function scrollToBox(pageN, rect, { align = 0.28 } = {}) {
+  const page = pages.find((p) => p.n === Number(pageN));
+  const r = normalizeRegionRect(rect);
+  if (!page || !scrollEl) return false;
+  const wrapRect = page.wrap.getBoundingClientRect();
+  const scRect = scrollEl.getBoundingClientRect();
+  const scale = wrapRect.width / (page.w || 612);
+  const boxTop = (r ? r[1] : 0) * scale;
+  const top = wrapRect.top - scRect.top + scrollEl.scrollTop + boxTop - scrollEl.clientHeight * align;
+  scrollEl.scrollTo({ top: Math.max(0, top), behavior: 'auto' });
+  if (r && scale > 0) {
+    const boxLeft = r[0] * scale;
+    const left = wrapRect.left - scRect.left + scrollEl.scrollLeft + boxLeft - 60;
+    if (left > scrollEl.scrollLeft + scrollEl.clientWidth * 0.5 || left < scrollEl.scrollLeft) {
+      scrollEl.scrollLeft = Math.max(0, left);
+    }
+  }
+  return true;
+}
+
 export function flashPara(paraId) {
   if (!contentEl) return;
   const spans = contentEl.querySelectorAll(`span[data-para="${cssEscape(paraId)}"]`);
@@ -1066,6 +1648,33 @@ function flashTermRange(para, start, end) {
     setTimeout(() => span.classList.remove('pr-flash'), 1400);
   }
   if (!flashed) flashPara(para.id);
+}
+
+/** 视口百分比滚动（j/k 快捷键用），fraction>0 向下。 */
+export function scrollByViewport(fraction) {
+  if (!scrollEl) return;
+  scrollEl.scrollBy({ top: Math.round(scrollEl.clientHeight * fraction), behavior: 'smooth' });
+}
+
+export function scrollToTop() {
+  if (scrollEl) scrollEl.scrollTo({ top: 0, behavior: 'auto' });
+}
+
+export function scrollToBottom() {
+  if (scrollEl) scrollEl.scrollTo({ top: scrollEl.scrollHeight, behavior: 'auto' });
+}
+
+/** 上一页/下一页（[ 与 ]），返回新的页码。 */
+export function goToAdjacentPage(delta) {
+  if (!pages.length) return getCurrentPage();
+  const target = Math.min(pages[pages.length - 1].n, Math.max(pages[0].n, (lastPage || 1) + Number(delta || 0)));
+  scrollToPage(target);
+  return target;
+}
+
+/** 直接设置滚动位置（返回栈恢复用）。 */
+export function setScrollTop(value) {
+  if (scrollEl) scrollEl.scrollTop = Math.max(0, Number(value) || 0);
 }
 
 /** 当前滚动位置（供 ui-state 持久化）。 */

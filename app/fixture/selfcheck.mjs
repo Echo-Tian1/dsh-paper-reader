@@ -44,6 +44,15 @@ import {
   thumbnailCrop,
   regionSizeLabel,
   selectionActionState,
+  searchParagraphs,
+  clampZoom,
+  zoomLabel,
+  mapShortcut,
+  linkAtPoint,
+  mergeLineRects,
+  annotationAtPoint,
+  normalizeAnnotationColor,
+  annotationColorClass,
 } from '../paper.js';
 import { embedded, post } from '../bridge.js';
 
@@ -154,6 +163,33 @@ check('index.html 有术语 tab / 框选工具条 / 缩略图容器', () => {
 check('styles.css 有框选 / 区域标记 / 缩略图 / 术语样式', () => {
   for (const token of ['.region-layer', '.region-box', '.region-mark', '.thread-thumb', '.terms-item', '.region-dragging']) {
     assert.ok(css.includes(token), `styles.css 缺少 ${token}`);
+  }
+});
+
+check('app.js 覆盖 P0 新端点（links / annotations / notes.md）', () => {
+  for (const token of ['/api/docs/${encodeURIComponent(docId)}/links', '/annotations', 'notesMdUrl', 'getAnnotations', 'createAnnotation', 'patchAnnotation', 'deleteAnnotation']) {
+    assert.ok(appJs.includes(token) || appJs.includes(token.replace('${encodeURIComponent(docId)}', '')), `app.js 缺少 ${token}`);
+  }
+  assert.ok(!/fetch\('\/api\//.test(appJs));
+});
+
+check('index.html 有 P0 新 UI 挂载点', () => {
+  for (const id of ['search-btn', 'search-bar', 'search-input', 'toc-panel', 'toc-list', 'links-toggle', 'back-pill', 'link-portal', 'tab-notes', 'pane-notes', 'notes-list', 'notes-export', 'anno-popover', 'anno-note', 'anno-colors', 'anno-delete', 'zoom-in', 'zoom-out', 'zoom-label']) {
+    assert.ok(html.includes(`id="${id}"`), `index.html 缺少 #${id}`);
+  }
+  assert.ok(html.includes('data-act="highlight"'));
+  assert.ok(html.includes('tab-notes'));
+});
+
+check('styles.css 有搜索高亮 / 目录 / 链接 / 批注样式', () => {
+  for (const token of ['.pr-search-hit', '.toc-panel', '.link-hotzone', '.anno-mark', '.anno-color-yellow', '.anno-popover', '.notes-item', '.back-pill', '.link-portal', '.zoom-control']) {
+    assert.ok(css.includes(token), `styles.css 缺少 ${token}`);
+  }
+});
+
+check('paper.js 实现 P0 地基（缩放/搜索/链接/批注）', () => {
+  for (const token of ['clampZoom', 'mapShortcut', 'searchParagraphs', 'setSearchResults', 'searchJump', 'setLinks', 'linkAtPoint', 'setAnnotations', 'mergeLineRects', 'selectionRects']) {
+    assert.ok(paperJs.includes(token), `paper.js 缺少 ${token}`);
   }
 });
 
@@ -497,11 +533,12 @@ check('thumbnailCrop：1.5x 页图裁剪 source 矩形', () => {
 
 check('selectionActionState：选区工具条按钮启用态', () => {
   const none = selectionActionState(null);
-  assert.deepEqual(none, { explain: false, translate: false, copy: false, cancel: true });
+  assert.deepEqual(none, { explain: false, translate: false, highlight: false, copy: false, cancel: true });
   const textOnly = selectionActionState({ text: 'hello', paraId: '' });
-  assert.deepEqual(textOnly, { explain: true, translate: false, copy: true, cancel: true });
+  assert.deepEqual(textOnly, { explain: true, translate: false, highlight: true, copy: true, cancel: true });
   const para = selectionActionState({ text: 'hello', paraId: 'p1' });
   assert.equal(para.translate, true);
+  assert.equal(para.highlight, true);
 });
 
 // ---------- v2 纯函数：kind / 术语 / 状态机 ----------
@@ -634,6 +671,140 @@ check('fixture v2：terms.json / terms.md 存在且结构正确', () => {
 
 check('fixture v2 mock 覆盖三个新接口', () => {
   for (const token of ['translateStream', 'explainRegionStream', 'getTerms', 'termsMdUrl', "kind: 'translate'", "kind: 'region'"]) {
+    assert.ok(mockJs.includes(token), `mock 缺少 ${token}`);
+  }
+});
+
+// ---------- P0 纯函数：搜索 / 缩放 / 快捷键 / 链接 / 矩形合并 ----------
+
+check('searchParagraphs：不区分大小写、按段与位置、空查询/上限', () => {
+  const paras = [
+    { id: 'p1', page: 1, text: 'Attention mechanisms ... attention.' },
+    { id: 'p2', page: 2, text: 'No match here.' },
+    { id: 'p3', page: 3, text: 'More ATTENTION later.' },
+  ];
+  const hits = searchParagraphs(paras, 'attention');
+  assert.equal(hits.length, 3);
+  assert.deepEqual(hits[0], { paraId: 'p1', page: 1, start: 0, end: 9, text: 'Attention' });
+  assert.equal(hits[1].start, 25);
+  assert.equal(hits[2].paraId, 'p3');
+  assert.equal(hits[2].text, 'ATTENTION');
+  assert.deepEqual(searchParagraphs(paras, ''), []);
+  assert.deepEqual(searchParagraphs(paras, '   '), []);
+  assert.equal(searchParagraphs(paras, 'attention', 2).length, 2);
+  // CJK 也能搜
+  const cjk = searchParagraphs([{ id: 'p1', page: 1, text: '注意力机制与注意力' }], '注意力');
+  assert.equal(cjk.length, 2);
+  assert.equal(cjk[1].start, 6);
+});
+
+check('clampZoom / zoomLabel：70%–200%，10% 步进', () => {
+  assert.equal(clampZoom(1), 1);
+  assert.equal(clampZoom(0.5), 0.7);
+  assert.equal(clampZoom(2.6), 2);
+  assert.equal(clampZoom(1.04), 1);
+  assert.equal(clampZoom(1.06), 1.1);
+  assert.equal(clampZoom('1.23'), 1.2);
+  assert.equal(clampZoom('abc'), 1);
+  assert.equal(clampZoom(NaN), 1);
+  assert.equal(zoomLabel(1), '100%');
+  assert.equal(zoomLabel(0.7), '70%');
+  assert.equal(zoomLabel(1.55), '160%');
+  assert.equal(zoomLabel(9), '200%');
+});
+
+check('mapShortcut：快捷键映射与输入框禁用', () => {
+  assert.equal(mapShortcut({ key: 'f', metaKey: true }), 'search');
+  assert.equal(mapShortcut({ key: 'f', ctrlKey: true }), 'search');
+  assert.equal(mapShortcut({ key: '+', metaKey: true }), 'zoom-in');
+  assert.equal(mapShortcut({ key: '-', ctrlKey: true }), 'zoom-out');
+  assert.equal(mapShortcut({ key: '0', metaKey: true }), 'zoom-reset');
+  assert.equal(mapShortcut({ key: 'j' }), 'scroll-down');
+  assert.equal(mapShortcut({ key: 'k' }), 'scroll-up');
+  assert.equal(mapShortcut({ key: 'g' }), 'scroll-top');
+  assert.equal(mapShortcut({ key: 'G', shiftKey: true }), 'scroll-bottom');
+  assert.equal(mapShortcut({ key: '[' }), 'prev-page');
+  assert.equal(mapShortcut({ key: ']' }), 'next-page');
+  assert.equal(mapShortcut({ key: 'j', editable: true }), null);
+  assert.equal(mapShortcut({ key: 'f', metaKey: true, editable: true }), null);
+  assert.equal(mapShortcut({ key: 'q' }), null);
+  assert.equal(mapShortcut({ key: 'j', altKey: true }), null);
+  assert.equal(mapShortcut({ key: 'x', metaKey: true }), null);
+});
+
+check('linkAtPoint：矩形命中 / 越界 / 重叠取后一个', () => {
+  const linksByPage = {
+    3: [
+      { rect: [10, 20, 110, 40], kind: 'goto', page: 11, text: 'A' },
+      { rect: [100, 30, 200, 50], kind: 'uri', uri: 'https://x', text: 'B' },
+    ],
+  };
+  assert.deepEqual(linkAtPoint(linksByPage, 3, 50, 30), linksByPage[3][0]);
+  assert.equal(linkAtPoint(linksByPage, 3, 105, 35), linksByPage[3][1]);
+  assert.equal(linkAtPoint(linksByPage, 3, 500, 500), null);
+  assert.equal(linkAtPoint(linksByPage, 1, 50, 30), null);
+  assert.equal(linkAtPoint(null, 3, 50, 30), null);
+  assert.equal(linkAtPoint({ 3: [{ rect: [1, 2, 3] }] }, 3, 2, 2), null);
+});
+
+check('mergeLineRects：同一行合并、跨行拆分、按行排序', () => {
+  const wordBoxes = [
+    { left: 100, top: 50, width: 20, height: 10 },
+    { left: 60, top: 50, width: 30, height: 10 },
+    { left: 60, top: 70, width: 80, height: 10 },
+  ];
+  const merged = mergeLineRects(wordBoxes);
+  assert.equal(merged.length, 2);
+  assert.deepEqual(merged[0], [60, 50, 120, 60]);
+  assert.deepEqual(merged[1], [60, 70, 140, 80]);
+  assert.deepEqual(mergeLineRects([]), []);
+  assert.deepEqual(mergeLineRects([{ left: NaN, top: 0, width: 1, height: 1 }]), []);
+});
+
+check('annotationAtPoint / 颜色归一化', () => {
+  const items = [
+    { id: 'a1', page: 1, rects: [[10, 20, 100, 40]], color: 'green' },
+    { id: 'a2', page: 1, rects: [[50, 30, 120, 50]], color: 'pink' },
+  ];
+  assert.equal(annotationAtPoint(items, 1, 20, 25).id, 'a1');
+  assert.equal(annotationAtPoint(items, 1, 60, 35).id, 'a2');
+  assert.equal(annotationAtPoint(items, 1, 500, 500), null);
+  assert.equal(annotationAtPoint(items, 2, 60, 35), null);
+  assert.equal(normalizeAnnotationColor('green'), 'green');
+  assert.equal(normalizeAnnotationColor('purple'), 'yellow');
+  assert.equal(normalizeAnnotationColor(undefined), 'yellow');
+  assert.equal(annotationColorClass('blue'), 'anno-color-blue');
+  assert.equal(annotationColorClass('weird'), 'anno-color-yellow');
+});
+
+// ---------- P0 fixture 数据 ----------
+
+check('fixture P0：links.json / annotations.json / notes.md 存在且结构正确', () => {
+  const links = readJson('fixture/links.json');
+  assert.ok(Array.isArray(links.pages) && links.pages.length >= 2);
+  const flat = links.pages.flatMap((p) => p.links || []);
+  assert.ok(flat.some((l) => l.kind === 'goto' && Number(l.page) > 1 && Array.isArray(l.to)));
+  assert.ok(flat.some((l) => l.kind === 'uri' && /^https?:/.test(l.uri)));
+  for (const link of flat) {
+    assert.equal(normalizeRegionRect(link.rect) !== null, true, '链接 rect 非法');
+    assert.ok(link.text, '链接缺少 text');
+  }
+
+  const ann = readJson('fixture/annotations.json');
+  assert.ok(Array.isArray(ann.items) && ann.items.length >= 2);
+  for (const item of ann.items) {
+    assert.ok(item.id && Array.isArray(item.rects) && item.rects.length >= 1);
+    assert.ok(['yellow', 'green', 'blue', 'pink'].includes(item.color));
+    for (const rect of item.rects) assert.equal(normalizeRegionRect(rect) !== null, true);
+  }
+
+  const md = readFileSync(path.join(APP, 'fixture/notes.md'), 'utf8');
+  assert.ok(md.includes('## 批注'));
+  assert.ok(md.includes('## 术语表'));
+});
+
+check('fixture mock 覆盖 P0 新接口', () => {
+  for (const token of ['getLinks', 'getAnnotations', 'createAnnotation', 'patchAnnotation', 'deleteAnnotation', 'notesMdUrl']) {
     assert.ok(mockJs.includes(token), `mock 缺少 ${token}`);
   }
 });
