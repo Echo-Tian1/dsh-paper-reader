@@ -20,8 +20,31 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import assert from 'node:assert/strict';
 
-import { renderMarkdown, createSSEParser, buildChatPayload, sortHistory } from '../explain.js';
-import { locateRange, alignWordOffsets, markBoxes, isCJKText, wordTextFor } from '../paper.js';
+import {
+  renderMarkdown,
+  createSSEParser,
+  buildChatPayload,
+  sortHistory,
+  resolveKind,
+  kindLabel,
+  isOldRecipe,
+  stripMachineComment,
+  termMetaParts,
+  threadActionState,
+} from '../explain.js';
+import {
+  locateRange,
+  alignWordOffsets,
+  markBoxes,
+  isCJKText,
+  wordTextFor,
+  clientToPdf,
+  normalizeRegionRect,
+  rectFromPoints,
+  thumbnailCrop,
+  regionSizeLabel,
+  selectionActionState,
+} from '../paper.js';
 import { embedded, post } from '../bridge.js';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
@@ -110,6 +133,36 @@ check('app.js 有 fixture 开关（正式逻辑不硬编码 fixture）', () => {
   assert.match(appJs, /params\.get\('fixture'\)\s*===\s*'1'/);
   assert.match(appJs, /import\('\.\/fixture\/mock\.js'\)/);
   assert.ok(!/fixture\/structure\.json/.test(appJs), '正式逻辑不应直接引用 fixture 数据');
+});
+
+check('app.js 覆盖 v2 新端点（translate / explain-region / terms）', () => {
+  for (const token of ['/api/translate', '/api/explain-region', '/terms', 'termsMdUrl', 'translateStream', 'explainRegionStream', 'getTerms']) {
+    assert.ok(appJs.includes(token), `app.js 缺少 ${token}`);
+  }
+  assert.ok(!/fetch\('\/api\//.test(appJs));
+});
+
+check('index.html 有术语 tab / 框选工具条 / 缩略图容器', () => {
+  for (const id of ['tab-terms', 'pane-terms', 'terms-list', 'terms-export', 'region-toolbar']) {
+    assert.ok(html.includes(`id="${id}"`), `index.html 缺少 #${id}`);
+  }
+  assert.ok(html.includes('region-shortcut'), 'index.html 缺少 Shift+拖动 提示');
+  assert.ok(html.includes('data-region-act="explain"'));
+  assert.ok(html.includes('data-act="translate"'));
+});
+
+check('styles.css 有框选 / 区域标记 / 缩略图 / 术语样式', () => {
+  for (const token of ['.region-layer', '.region-box', '.region-mark', '.thread-thumb', '.terms-item', '.region-dragging']) {
+    assert.ok(css.includes(token), `styles.css 缺少 ${token}`);
+  }
+});
+
+check('paper.js 实现 Shift 框选与坐标换算', () => {
+  assert.ok(paperJs.includes('pointerdown'));
+  assert.ok(paperJs.includes('event.shiftKey'));
+  assert.ok(paperJs.includes('clientToPdf'));
+  assert.ok(paperJs.includes('regionThumbnail'));
+  assert.ok(paperJs.includes('flashRegion'));
 });
 
 check('paper.js 用 data-para + 容器 scale 渲染', () => {
@@ -370,11 +423,219 @@ check('fixture 无文字层页 hasText=false 且 words 为空', () => {
 check('fixture mock 覆盖全部客户端 API', () => {
   for (const method of [
     'listDocs', 'upload', 'getStructure', 'getPage', 'pageImageUrl',
-    'getIndex', 'getExplanations', 'explainStream', 'postUiState', 'getUiState', 'health',
+    'getIndex', 'getExplanations', 'explainStream', 'translateStream', 'explainRegionStream',
+    'getTerms', 'termsMdUrl', 'postUiState', 'getUiState', 'health',
   ]) {
     assert.ok(new RegExp(`\\b${method}\\s*\\(`).test(mockJs), `mock 缺少 ${method}`);
   }
   assert.ok(mockJs.includes("cached: true"));
+});
+
+// ---------- v2 纯函数：框选坐标 ----------
+
+check('clientToPdf：屏幕坐标 → PDF 点（含滚动偏移 / 缩放 / 越界钳制）', () => {
+  // 页 612×792 显示宽 306（scale 0.5），页面在视口 left=100 top=50
+  const pageEl = {
+    getBoundingClientRect: () => ({ left: 100, top: 50, width: 306, height: 396 }),
+  };
+  const mid = clientToPdf(pageEl, 253, 248, 612, 792);
+  assert.equal(mid.x, 306);
+  assert.equal(mid.y, 396);
+
+  // 滚动：页面往上滚了 250px（rect.top 变负），clientY 48 → (48+200)/0.5=496
+  const scrolled = { getBoundingClientRect: () => ({ left: 100, top: -200, width: 306, height: 396 }) };
+  const scrolledPoint = clientToPdf(scrolled, 253, 48, 612, 792);
+  assert.equal(scrolledPoint.x, 306);
+  assert.equal(scrolledPoint.y, 496);
+
+  // 窗口放大：1.5x 显示（918 宽），同样 clientX 相对左边缘 459 → pdf 306
+  const zoomed = { getBoundingClientRect: () => ({ left: 0, top: 0, width: 918, height: 1188 }) };
+  const zoomedPoint = clientToPdf(zoomed, 459, 594, 612, 792);
+  assert.equal(zoomedPoint.x, 306);
+  assert.equal(zoomedPoint.y, 396);
+
+  // 越界钳制 + 尺寸为 0 的保护
+  assert.deepEqual(clientToPdf(pageEl, 0, 0, 612, 792), { x: 0, y: 0 });
+  assert.deepEqual(clientToPdf(pageEl, 9999, 9999, 612, 792), { x: 612, y: 792 });
+  assert.deepEqual(clientToPdf({ getBoundingClientRect: () => ({ left: 0, top: 0, width: 0, height: 0 }) }, 10, 10, 612, 792), { x: 0, y: 0 });
+});
+
+check('rectFromPoints：反向拖动归一化 + 太小取消（<8pt）', () => {
+  const normal = rectFromPoints({ x: 100, y: 120 }, { x: 40, y: 60 });
+  assert.deepEqual(normal.rect, [40, 60, 100, 120]);
+  assert.equal(normal.tooSmall, false);
+
+  const tiny = rectFromPoints({ x: 100, y: 100 }, { x: 103, y: 130 });
+  assert.equal(tiny.tooSmall, true);
+  const thin = rectFromPoints({ x: 100, y: 100 }, { x: 160, y: 105 });
+  assert.equal(thin.tooSmall, true);
+  const edge = rectFromPoints({ x: 0, y: 0 }, { x: 8, y: 8 });
+  assert.equal(edge.tooSmall, false);
+});
+
+check('normalizeRegionRect / regionSizeLabel', () => {
+  assert.deepEqual(normalizeRegionRect([10.26, 20.24, 5, 8]), [5, 8, 10.3, 20.2]);
+  assert.equal(normalizeRegionRect('[1,2,3,4]'), null);
+  assert.equal(normalizeRegionRect([1, 2, 3]), null);
+  assert.equal(normalizeRegionRect([1, NaN, 3, 4]), null);
+  assert.equal(regionSizeLabel([10, 20, 110, 80]), '100×60 pt');
+  assert.equal(regionSizeLabel(null), '');
+});
+
+check('thumbnailCrop：1.5x 页图裁剪 source 矩形', () => {
+  // 612×792 PDF 点，页图 918×1188（1.5x）
+  const crop = thumbnailCrop([0, 0, 306, 396], 612, 792, 918, 1188);
+  assert.deepEqual(crop, { sx: 0, sy: 0, sw: 459, sh: 594 });
+  const offset = thumbnailCrop([100, 200, 300, 400], 600, 800, 900, 1200);
+  assert.equal(offset.sx, 150);
+  assert.equal(offset.sy, 300);
+  assert.equal(offset.sw, 300);
+  assert.equal(offset.sh, 300);
+  assert.equal(thumbnailCrop([0, 0, 0, 0], 612, 792, 918, 1188).sw >= 1, true);
+  assert.equal(thumbnailCrop([0, 0, 1, 1], 0, 792, 918, 1188), null);
+});
+
+check('selectionActionState：选区工具条按钮启用态', () => {
+  const none = selectionActionState(null);
+  assert.deepEqual(none, { explain: false, translate: false, copy: false, cancel: true });
+  const textOnly = selectionActionState({ text: 'hello', paraId: '' });
+  assert.deepEqual(textOnly, { explain: true, translate: false, copy: true, cancel: true });
+  const para = selectionActionState({ text: 'hello', paraId: 'p1' });
+  assert.equal(para.translate, true);
+});
+
+// ---------- v2 纯函数：kind / 术语 / 状态机 ----------
+
+check('resolveKind：meta 优先、entry 兜底、未知/缺失视为 explain', () => {
+  assert.equal(resolveKind({ kind: 'translate' }, null), 'translate');
+  assert.equal(resolveKind(null, { kind: 'region' }), 'region');
+  assert.equal(resolveKind({ kind: 'translate' }, { kind: 'region' }), 'translate');
+  assert.equal(resolveKind(null, null), 'explain');
+  assert.equal(resolveKind({ kind: 'weird' }, null), 'explain');
+  assert.equal(resolveKind(null, { kind: 'explain' }), 'explain');
+});
+
+check('kindLabel / isOldRecipe：历史徽标与旧配方', () => {
+  assert.equal(kindLabel('explain'), '解释');
+  assert.equal(kindLabel('translate'), '翻译');
+  assert.equal(kindLabel('region'), '公式');
+  assert.equal(kindLabel(undefined), '解释');
+  assert.equal(isOldRecipe('v1', 'explain'), true);
+  assert.equal(isOldRecipe('v2', 'explain'), false);
+  assert.equal(isOldRecipe('translate-v1', 'translate'), false);
+  assert.equal(isOldRecipe('v1', 'translate'), true);
+  assert.equal(isOldRecipe('region-v1', 'region'), false);
+  assert.equal(isOldRecipe(undefined, 'explain'), false);
+});
+
+check('threadActionState：三种 kind 的按钮文案与禁用态', () => {
+  const streamingTranslate = threadActionState({ status: 'streaming', kind: 'translate', embedded: true });
+  assert.equal(streamingTranslate.retry.label, '翻译中…');
+  assert.equal(streamingTranslate.retry.disabled, true);
+  assert.equal(streamingTranslate.chat.disabled, true);
+
+  const doneTranslate = threadActionState({ status: 'done', kind: 'translate', embedded: true, hasAnswer: true });
+  assert.equal(doneTranslate.retry.label, '重新翻译');
+  assert.equal(doneTranslate.retry.force, true);
+  assert.equal(doneTranslate.copyDisabled, false);
+  assert.ok(doneTranslate.hint.includes('不自动发送'));
+
+  const doneExplain = threadActionState({ status: 'done', kind: 'explain', embedded: false, hasAnswer: true });
+  assert.equal(doneExplain.retry.label, '重新解释');
+  assert.equal(doneExplain.chat.disabled, true);
+  assert.ok(doneExplain.hint.includes('需在 DSH 窗口内使用'));
+
+  const errorRegion = threadActionState({ status: 'error', kind: 'region', embedded: true, hasAnswer: false });
+  assert.equal(errorRegion.copyDisabled, true);
+  assert.equal(errorRegion.chat.disabled, false);
+});
+
+check('stripMachineComment / renderMarkdown 不显示 terms 注释', () => {
+  const withComment = '正文内容\n<!--terms:{"terms":[{"term":"Transformer"}]}-->';
+  assert.equal(stripMachineComment(withComment), '正文内容');
+  assert.ok(!renderMarkdown(withComment).includes('terms:'));
+  assert.ok(renderMarkdown(withComment).includes('正文内容'));
+  // 流式中未闭合的注释也要先藏起来
+  assert.equal(stripMachineComment('正文\n<!--terms:{"terms":['), '正文');
+  assert.equal(stripMachineComment('普通文本'), '普通文本');
+});
+
+check('termMetaParts：出现次数 / 首次出现页', () => {
+  assert.deepEqual(termMetaParts({ count: 3, page: 2 }), ['出现 3 次', '首次出现 · 第 2 页']);
+  assert.deepEqual(termMetaParts({ count: 0, page: 0 }), []);
+  assert.deepEqual(termMetaParts({}), []);
+});
+
+check('SSE kind 分发：translate / region 事件被正确解析', () => {
+  const events = [];
+  const parser = createSSEParser((ev) => events.push(ev));
+  parser.feed('data: {"type":"meta","kind":"translate","cached":false,"id":"e1"}\n\n');
+  parser.feed('data: {"type":"delta","text":"译文"}\n\n');
+  parser.feed('data: {"type":"done","entry":{"id":"e1","kind":"translate","answer":"x"}}\n\n');
+  parser.feed('data: {"type":"meta","kind":"region","cached":true,"id":"e2"}\n\n');
+  parser.feed('data: {"type":"done","entry":{"id":"e2","kind":"region","rect":[1,2,3,4]}}\n\n');
+  assert.equal(events.length, 5);
+  assert.equal(resolveKind(events[0], null), 'translate');
+  assert.equal(events[1].text, '译文');
+  assert.equal(resolveKind(null, events[2].entry), 'translate');
+  assert.equal(resolveKind(events[3], null), 'region');
+  assert.deepEqual(events[4].entry.rect, [1, 2, 3, 4]);
+});
+
+// ---------- v2 fixture 数据 ----------
+
+check('fixture v2 index/entries：kind 合法、region 带 rect、translate 带 peraId', () => {
+  const indexEntries = readJson('fixture/explanations-index.json').index;
+  const fullEntries = readJson('fixture/explanations.json').entries;
+  assert.ok(indexEntries.length >= 5);
+  for (const entry of indexEntries) {
+    assert.ok(['explain', 'translate', 'region'].includes(entry.kind));
+    if (entry.kind === 'region') {
+      assert.equal(normalizeRegionRect(entry.rect) !== null, true, `${entry.id} 缺 rect`);
+    }
+    if (entry.kind === 'explain') {
+      const para = paraById.get(entry.paraId);
+      assert.ok(Array.isArray(entry.sent), `${entry.id} 缺 sent`);
+      assert.ok(entry.sent[0] >= 0 && entry.sent[1] <= para.text.length, `${entry.id} sent 越界`);
+    }
+  }
+  for (const entry of fullEntries) {
+    assert.ok(entry.answer && entry.answer.length > 20, `${entry.id} 缺 answer`);
+    if (entry.kind === 'translate') assert.ok(entry.paraId, `${entry.id} 缺 paraId`);
+  }
+});
+
+check('fixture v2：sent 区间标记优先于 selText 搜索', () => {
+  const para = paraById.get('p1');
+  const entry = readJson('fixture/explanations-index.json').index.find((e) => e.id === 'e_fixture01');
+  const words = wordsOf(page1, para.id);
+  const bySent = markBoxes(para, words, '完全对不上的文本', entry.sent);
+  assert.ok(bySent.length >= 1, 'sent 区间应能定位');
+  const boxArea = bySent.reduce((sum, b) => sum + b.width * b.height, 0);
+  assert.ok(boxArea > 0);
+  // 不传 sent 且文本对不上时退回整段 bbox（仍可点）
+  const fallback = markBoxes(para, words, '完全对不上的文本');
+  assert.ok(fallback.length >= 1);
+});
+
+check('fixture v2：terms.json / terms.md 存在且结构正确', () => {
+  assert.ok(existsSync(path.join(APP, 'fixture/terms.json')));
+  const terms = readJson('fixture/terms.json').terms;
+  assert.ok(terms.length >= 3);
+  for (const term of terms) {
+    assert.ok(term.key && term.term, '术语缺 key/term');
+    assert.ok(Number(term.count) > 0);
+    assert.ok(Number(term.page) > 0);
+  }
+  const md = readFileSync(path.join(APP, 'fixture/terms.md'), 'utf8');
+  assert.ok(md.includes('| 术语 | 中文 | 说明 | 出现次数 |'));
+  assert.ok(md.includes('Attention'));
+});
+
+check('fixture v2 mock 覆盖三个新接口', () => {
+  for (const token of ['translateStream', 'explainRegionStream', 'getTerms', 'termsMdUrl', "kind: 'translate'", "kind: 'region'"]) {
+    assert.ok(mockJs.includes(token), `mock 缺少 ${token}`);
+  }
 });
 
 // ---------- 汇总 ----------

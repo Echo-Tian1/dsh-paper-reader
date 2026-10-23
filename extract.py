@@ -3,7 +3,8 @@
 """文献阅读坞 · PDF 抽取器（宿主半）
 
 用法：
-    python3 extract.py <source.pdf> <outDir>
+    python3 extract.py <source.pdf> <outDir>                  # 全量抽取
+    python3 extract.py --region <pdf> <page> <x0,y0,x1,y1>    # 框选区域文字层（一次性，stdout 一行 JSON）
 
 产物：
     <outDir>/structure.json      章节 / 段落 / 句子区间 / 页元数据（最后写，失败时不留“完整”假象）
@@ -601,7 +602,65 @@ def write_json(file_path, payload):
     write_bytes_atomic(file_path, json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode("utf-8"))
 
 
+def region_cli(argv):
+    """--region 子命令：一次性抽取某页矩形区域的文字层（无守护进程，单次 <1s）。"""
+    if len(argv) != 5:
+        fail("py-error", "用法：python3 extract.py --region <source.pdf> <page> <x0,y0,x1,y1>", 2)
+    source_path = argv[2]
+    try:
+        page_number = int(argv[3])
+    except (TypeError, ValueError):
+        fail("bad-region", "页码必须是整数：%s" % argv[3], 2)
+    parts = str(argv[4]).split(",")
+    if len(parts) != 4:
+        fail("bad-region", "rect 必须是 4 个数字：x0,y0,x1,y1", 2)
+    try:
+        coordinates = [float(part.strip()) for part in parts]
+    except (TypeError, ValueError):
+        fail("bad-region", "rect 坐标必须是数字：%s" % argv[4], 2)
+    x0, y0, x1, y1 = coordinates
+    if x1 <= x0 or y1 <= y0:
+        fail("bad-region", "rect 必须满足 x1 > x0 且 y1 > y0", 2)
+    if not os.path.isfile(source_path):
+        fail("bad-pdf", "文件不存在：%s" % source_path, 2)
+
+    doc = None
+    try:
+        doc = fitz.open(source_path)
+        if doc.needs_pass:
+            fail("encrypted", "这是加密 PDF，无法抽取文字；请先解除密码再上传", 2)
+        total = int(doc.page_count)
+        if page_number < 1 or page_number > total:
+            fail("bad-region", "页码超出范围：第 %d 页（共 %d 页）" % (page_number, total), 2)
+        page = doc[page_number - 1]
+        clip = fitz.Rect(x0, y0, x1, y1) & page.rect
+        if clip.is_empty or clip.width <= 0 or clip.height <= 0:
+            fail("bad-region", "框选区域与页面没有交集", 2)
+        text = page.get_text("text", clip=clip)
+        print(json.dumps({
+            "ok": True,
+            "page": page_number,
+            "rect": [round(clip.x0, 2), round(clip.y0, 2), round(clip.x1, 2), round(clip.y1, 2)],
+            "hasText": bool(text.strip()),
+            "text": text,
+        }, ensure_ascii=False))
+        sys.stdout.flush()
+        return 0
+    except SystemExit:
+        raise
+    except Exception as exc:
+        fail("py-error", "区域抽取失败：%s: %s" % (type(exc).__name__, exc), 1)
+    finally:
+        if doc is not None:
+            try:
+                doc.close()
+            except Exception:
+                pass
+
+
 def main(argv):
+    if len(argv) >= 2 and argv[1] == "--region":
+        return region_cli(argv)
     if len(argv) != 3:
         fail("py-error", "用法：python3 extract.py <source.pdf> <outDir>", 2)
     source_path, out_dir = argv[1], argv[2]

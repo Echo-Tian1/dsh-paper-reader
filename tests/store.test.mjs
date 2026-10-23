@@ -96,7 +96,7 @@ describe('归一化 norm()', () => {
     const base = cacheKey(DOC_ID, RECIPE, 'hello world', 'p12')
     assert.match(base, /^[0-9a-f]{64}$/)
     assert.notEqual(base, cacheKey('ffffffffffffffff', RECIPE, 'hello world', 'p12'))
-    assert.notEqual(base, cacheKey(DOC_ID, 'v2', 'hello world', 'p12'))
+    assert.notEqual(base, cacheKey(DOC_ID, 'v3', 'hello world', 'p12'))
     assert.notEqual(base, cacheKey(DOC_ID, RECIPE, 'hello world', 'p13'))
     assert.notEqual(base, cacheKey(DOC_ID, RECIPE, 'hello worlds', 'p12'))
   })

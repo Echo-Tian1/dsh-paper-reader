@@ -36,6 +36,8 @@ const state = {
   paneCollapsed: false,
 };
 
+let pendingRegion = null; // { page, rect }：框选完、等工具条确认的区域
+
 // ---------- HTTP 客户端（正式模式） ----------
 
 async function parseResponse(res) {
@@ -54,6 +56,15 @@ async function parseResponse(res) {
   }
   if (data == null) throw new Error('接口返回了无法解析的内容');
   return data;
+}
+
+function postStream(path, body, signal) {
+  return fetch(path, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json', accept: 'text/event-stream' },
+    body: JSON.stringify(body),
+    signal,
+  });
 }
 
 const httpApi = {
@@ -108,12 +119,25 @@ const httpApi = {
   },
 
   explainStream(body, signal) {
-    return fetch(`${API_BASE}/api/explain`, {
-      method: 'POST',
-      headers: { 'content-type': 'application/json', accept: 'text/event-stream' },
-      body: JSON.stringify(body),
-      signal,
-    });
+    return postStream(`${API_BASE}/api/explain`, body, signal);
+  },
+
+  translateStream(body, signal) {
+    return postStream(`${API_BASE}/api/translate`, body, signal);
+  },
+
+  explainRegionStream(body, signal) {
+    return postStream(`${API_BASE}/api/explain-region`, body, signal);
+  },
+
+  async getTerms(docId) {
+    return parseResponse(
+      await fetch(`${API_BASE}/api/docs/${encodeURIComponent(docId)}/terms`, { cache: 'no-store' })
+    );
+  },
+
+  termsMdUrl(docId) {
+    return `${API_BASE}/api/docs/${encodeURIComponent(docId)}/terms.md`;
   },
 
   async postUiState(uiState) {
@@ -162,9 +186,13 @@ async function main() {
     embedded: bridge.embedded,
     getDocMeta: () => ({ title: state.structure?.title || state.doc?.title || '' }),
     getParaContext: paper.getParaContext,
-    onJump: (page, paraId) => {
-      paper.scrollToPage(page);
-      paper.flashPara(paraId);
+    getRegionThumbnail: (page, rect) => paper.regionThumbnail(page, rect),
+    ensurePageImage: (page) => paper.ensurePageImage(page),
+    onTermJump: (term) => paper.jumpToTerm(term),
+    onJumpEntry: (entry) => {
+      paper.scrollToPage(entry.page);
+      if (entry.kind === 'region') paper.flashRegion(entry.page, entry.rect);
+      else paper.flashPara(entry.paraId);
     },
     onEntrySaved: (entry) => {
       paper.addExplanation(entry);
@@ -196,6 +224,7 @@ async function main() {
       else setCollapsed(false);
     },
     onPageChange: handlePageChange,
+    onRegionChange: handleRegionChange,
     toast,
   });
 
@@ -249,6 +278,7 @@ function cacheEls() {
     'pane-close',
     'drawer-backdrop',
     'selection-toolbar',
+    'region-toolbar',
     'toast',
     'busy',
     'busy-text',
@@ -297,6 +327,10 @@ function wireEvents() {
       const info = state.sel;
       hideToolbar();
       if (info) runExplain(info);
+    } else if (action === 'translate') {
+      const info = state.sel;
+      hideToolbar();
+      if (info) runTranslate(info);
     } else if (action === 'copy') {
       const info = state.sel;
       hideToolbar();
@@ -307,7 +341,12 @@ function wireEvents() {
     }
   });
 
-  els.paperScroll.addEventListener('scroll', hideToolbar, { passive: true });
+  els.paperScroll.addEventListener('scroll', () => {
+    hideToolbar();
+    if (pendingRegion) cancelRegion();
+  }, { passive: true });
+
+  wireRegionToolbar();
 
   document.addEventListener('dragenter', onDragEnter);
   document.addEventListener('dragover', onDragOver);
@@ -318,6 +357,7 @@ function wireEvents() {
   document.addEventListener('keydown', (event) => {
     if (event.key === 'Escape') {
       hideToolbar();
+      if (pendingRegion) cancelRegion();
       if (state.narrow && state.paneOpen) closePane();
     }
   });
@@ -400,6 +440,7 @@ function hideEmptyState() {
 async function openDoc(docId, { restoreScrollTop = null } = {}) {
   if (!docId || !state.api) return;
   hideToolbar();
+  cancelRegion();
   setBusy(true, '正在打开论文…');
   try {
     const structure = await state.api.getStructure(docId);
@@ -456,6 +497,7 @@ function handlePageChange(n) {
   updatePageIndicator();
   schedulePersist();
   hideToolbar();
+  if (pendingRegion) cancelRegion();
 }
 
 function updatePageIndicator() {
@@ -558,6 +600,7 @@ function handleSelectionChange(info) {
     hideToolbar();
     return;
   }
+  if (pendingRegion) cancelRegion();
   showToolbar(info.rect);
 }
 
@@ -573,6 +616,15 @@ function showToolbar(rect) {
   top = Math.min(Math.max(top, 8), window.innerHeight - barHeight - 8);
   bar.style.left = `${Math.round(left)}px`;
   bar.style.top = `${Math.round(top)}px`;
+  const actions = paper.selectionActionState(state.sel);
+  for (const btn of bar.querySelectorAll('[data-act]')) {
+    const act = btn.dataset.act;
+    if (act in actions) btn.disabled = !actions[act];
+  }
+  const translateBtn = bar.querySelector('[data-act="translate"]');
+  if (translateBtn) {
+    translateBtn.title = actions.translate ? '把所在段落整段翻译' : '选区没有落到段落上，无法整段翻译';
+  }
 }
 
 function hideToolbar() {
@@ -587,9 +639,89 @@ function runExplain(info) {
   else setCollapsed(false);
 }
 
+function runTranslate(info) {
+  if (!info?.paraId || !state.doc) {
+    toast('这个选区没有落到段落上，无法整段翻译', 'error');
+    return;
+  }
+  const ctx = paper.getParaContext(info.paraId);
+  explain.translatePara({
+    page: info.page,
+    paraId: info.paraId,
+    paraText: ctx.paraText,
+    sectionTitle: ctx.sectionTitle,
+  });
+  if (state.narrow) openPane();
+  else setCollapsed(false);
+}
+
 async function copyText(text) {
   const ok = await explain.copyText(text);
   toast(ok ? '已复制选句' : '复制失败，请手动复制', ok ? 'info' : 'error');
+}
+
+// ---------- Shift 框选区域 ----------
+
+function wireRegionToolbar() {
+  const bar = els.regionToolbar;
+  if (!bar) return;
+  bar.addEventListener('mousedown', (event) => event.preventDefault());
+  bar.addEventListener('click', (event) => {
+    const act = event.target.closest('[data-region-act]')?.dataset.regionAct;
+    if (!act) return;
+    if (act === 'explain') {
+      const region = pendingRegion;
+      hideRegionToolbar();
+      paper.clearRegion();
+      if (region) runRegionExplain(region);
+    } else {
+      cancelRegion();
+    }
+  });
+}
+
+function handleRegionChange(region) {
+  pendingRegion = region ? { page: region.page, rect: [...region.rect] } : null;
+  if (!region) {
+    hideRegionToolbar();
+    return;
+  }
+  hideToolbar();
+  showRegionToolbar(region.client);
+}
+
+function showRegionToolbar(client) {
+  const bar = els.regionToolbar;
+  if (!bar) return;
+  bar.hidden = false;
+  const barWidth = bar.offsetWidth || 210;
+  const barHeight = bar.offsetHeight || 32;
+  const anchorX = Number.isFinite(client?.x) ? client.x : window.innerWidth / 2;
+  const anchorY = Number.isFinite(client?.y) ? client.y : 120;
+  let left = anchorX;
+  left = Math.min(Math.max(left, barWidth / 2 + 8), window.innerWidth - barWidth / 2 - 8);
+  let top = anchorY - barHeight - 10;
+  if (top < 56) top = anchorY + 14;
+  top = Math.min(Math.max(top, 8), window.innerHeight - barHeight - 8);
+  bar.style.left = `${Math.round(left)}px`;
+  bar.style.top = `${Math.round(top)}px`;
+}
+
+function hideRegionToolbar() {
+  if (els.regionToolbar) els.regionToolbar.hidden = true;
+}
+
+function cancelRegion() {
+  pendingRegion = null;
+  hideRegionToolbar();
+  paper.clearRegion();
+}
+
+function runRegionExplain(region) {
+  if (!state.doc) return;
+  explain.explainRegion({ page: region.page, rect: region.rect });
+  if (state.narrow) openPane();
+  else setCollapsed(false);
 }
 
 // ---------- 窄态抽屉 ----------

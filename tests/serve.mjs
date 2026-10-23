@@ -96,8 +96,8 @@ function mapUsage(raw) {
   return usage
 }
 
-/** 三段式假答案：形状与 recipe v1 要求一致，便于 grep 验证。 */
-const FAKE_ANSWER = [
+/** 三段式假答案：形状与 recipe v2 要求一致（末尾带 terms trailer），便于 grep 验证。 */
+const FAKE_EXPLAIN_BODY = [
   '### 1. 中译',
   '我们提出 Transformer，一种完全基于注意力机制的模型架构（architecture），彻底摒弃了循环（recurrence）与卷积（convolution）。',
   '',
@@ -108,6 +108,23 @@ const FAKE_ANSWER = [
   '### 3. 在论证中的位置',
   '这句是全文的立论句：先指出此前最优模型仍依赖循环或卷积，再给出本工作的替代方案，为后文的编码器/解码器结构做铺垫。',
 ].join('\n')
+const FAKE_EXPLAIN_ANSWER = `${FAKE_EXPLAIN_BODY}\n<!--terms:{"terms":[{"term":"recurrence","zh":"循环","note":"按时间步递推的序列建模结构"},{"term":"eschewing","zh":"避开","note":"刻意不使用某种结构"}]}-->`
+
+/** 整段翻译假答案：纯译文（无三段式、无解说）。 */
+const FAKE_TRANSLATE_ANSWER = '我们提出 Transformer，一种完全基于注意力机制的模型架构，彻底摒弃了循环与卷积。在序列建模与转导问题（如语言建模和机器翻译）中，循环神经网络、长短期记忆网络与门控循环神经网络一直被视为最优方法。'
+
+/** 框选区域假答案：三段式，模拟公式/图区域解释。 */
+const FAKE_REGION_ANSWER = [
+  '### 1. 这是什么',
+  '这是缩放点积注意力（scaled dot-product attention）的计算公式，对应论文第 4 页的公式 (1)。',
+  '',
+  '### 2. 符号与含义',
+  '- Q、K、V：查询（query）、键（key）、值（value）矩阵。',
+  '- dk：键向量的维度，用于缩放点积，避免内积过大导致 softmax 梯度消失。',
+  '',
+  '### 3. 与上下文的关系',
+  '公式定义了注意力权重的计算方式，紧接其后的段落解释了为什么除以 √dk、以及常见的加性注意力与点积注意力有何差异。',
+].join('\n')
 
 /** 假 llm 桩：按固定答案切片产出 text-delta，最后 usage + finish(stop)。 */
 function makeFakeLlm() {
@@ -116,9 +133,12 @@ function makeFakeLlm() {
       llmCalls += 1
       const call = llmCalls
       const userText = userTextOf(options)
+      const system = String(options?.system ?? '')
+      const kind = system.includes('框选') ? 'region' : system.includes('学术翻译') ? 'translate' : 'explain'
+      const answer = kind === 'region' ? FAKE_REGION_ANSWER : kind === 'translate' ? FAKE_TRANSLATE_ANSWER : FAKE_EXPLAIN_ANSWER
       // 选句里带 FAIL-LLM 时模拟模型失败，用来验证 SSE error 事件（不写缓存）
-      const failing = /FAIL-LLM/i.test(userText)
-      console.log(`[serve] LLM 调用 #${call}（假桩）model=${options?.model} temperature=${options?.temperature} maxTokens=${options?.maxTokens} 位置=${locationOf(userText)}${failing ? ' [模拟失败]' : ''}`)
+      const failing = kind === 'explain' && /FAIL-LLM/i.test(userText)
+      console.log(`[serve] LLM 调用 #${call}（假桩/${kind}）model=${options?.model} temperature=${options?.temperature} maxTokens=${options?.maxTokens} 位置=${locationOf(userText)}${failing ? ' [模拟失败]' : ''}`)
       return (async function* generate() {
         yield { type: 'block-start', index: 0, blockType: 'text' }
         if (failing) {
@@ -126,9 +146,9 @@ function makeFakeLlm() {
           yield finishError('模拟模型失败：未配置 provider（serve.mjs 触发）', 'SIMULATED')
           return
         }
-        for (let at = 0; at < FAKE_ANSWER.length; at += 6) {
+        for (let at = 0; at < answer.length; at += 6) {
           await new Promise(resolve => setTimeout(resolve, 15))
-          yield { type: 'text-delta', index: 0, text: FAKE_ANSWER.slice(at, at + 6) }
+          yield { type: 'text-delta', index: 0, text: answer.slice(at, at + 6) }
         }
         yield { type: 'usage', usage: { inputTokens: 512, outputTokens: 128 } }
         yield { type: 'finish', reason: { kind: 'stop' } }

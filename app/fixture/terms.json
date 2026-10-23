@@ -1,0 +1,37 @@
+{
+ "terms": [
+  {
+   "key": "attention",
+   "term": "Attention",
+   "zh": "注意力",
+   "note": "在序列建模中把查询与键的相似度作为权重对值加权求和。",
+   "count": 3,
+   "page": 1,
+   "paraId": "p1",
+   "firstEntryId": "e_fixture01",
+   "updatedAt": "2026-10-22T07:30:00.000Z"
+  },
+  {
+   "key": "transduction",
+   "term": "Transduction",
+   "zh": "转导",
+   "note": "把输入序列映射为另一条输出序列的任务（如机器翻译）。",
+   "count": 2,
+   "page": 1,
+   "paraId": "p1",
+   "firstEntryId": "e_fixture01",
+   "updatedAt": "2026-10-22T07:30:00.000Z"
+  },
+  {
+   "key": "residual-connection",
+   "term": "residual connection",
+   "zh": "残差连接",
+   "note": "把子层输入直接加到输出上，缓解深层网络训练困难。",
+   "count": 1,
+   "page": 1,
+   "paraId": "p3",
+   "firstEntryId": "e_region01",
+   "updatedAt": "2026-10-22T07:50:00.000Z"
+  }
+ ]
+}

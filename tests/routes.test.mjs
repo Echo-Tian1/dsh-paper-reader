@@ -12,9 +12,13 @@ import os from 'node:os'
 import path from 'node:path'
 
 import { apply, createApp } from '../index.js'
+import { appendExplanation, sha256 } from '../store.js'
 
 const FIXTURE = '/Users/echo/Downloads/1706.03762v7.pdf'
-const ANSWER = '### 1. 中译\n这是译文。\n### 2. 难点\n- 术语：attention\n### 3. 在论证中的位置\n承上启下。'
+const EXPLAIN_BODY = '### 1. 中译\n这是译文。\n### 2. 难点\n- 术语：attention\n### 3. 在论证中的位置\n承上启下。'
+const EXPLAIN_ANSWER = `${EXPLAIN_BODY}\n<!--terms:{"terms":[{"term":"attention","zh":"注意力","note":"按相关性加权求和的机制"}]}-->`
+const TRANSLATE_ANSWER = '我们提出 Transformer，一种完全基于注意力机制的模型架构，彻底摒弃了循环与卷积。'
+const REGION_ANSWER = '### 1. 这是什么\n这是缩放点积注意力公式（scaled dot-product attention）。\n### 2. 符号与含义\n- Q/K/V：查询、键、值矩阵\n- dk：键向量维度\n### 3. 与上下文的关系\n公式定义了注意力权重的计算方式，后文据此解释多头注意力。'
 const PREFIX = '/dsh-paper-reader'
 
 const sleep = ms => new Promise(resolve => setTimeout(resolve, ms))
@@ -92,12 +96,18 @@ function fakeCtx(llm) {
   }
 }
 
-function makeLlm(answer = ANSWER) {
+function makeLlm() {
   const calls = []
   return {
     calls,
     stream(options) {
       calls.push(options)
+      const system = String(options?.system ?? '')
+      const answer = system.includes('框选')
+        ? REGION_ANSWER
+        : system.includes('学术翻译')
+          ? TRANSLATE_ANSWER
+          : EXPLAIN_ANSWER
       return (async function* generate() {
         yield { type: 'block-start', index: 0, blockType: 'text' }
         for (let at = 0; at < answer.length; at += 7) {
@@ -319,14 +329,17 @@ describe('宿主路由（真实抽取 + 假 llm）', () => {
     assert.match(events[0].key, /^[0-9a-f]{64}$/)
     const deltas = events.filter(event => event.type === 'delta')
     assert.ok(deltas.length > 1, '流式应有多个 delta 事件')
-    assert.equal(deltas.map(event => event.text).join(''), ANSWER)
+    // terms trailer 必须被 holdback 扣住：客户端看不到，也不进 answer
+    assert.equal(deltas.some(event => event.text.includes('<!--terms:')), false)
+    assert.equal(deltas.map(event => event.text).join('').trimEnd(), EXPLAIN_BODY)
     const done = events.at(-1)
     assert.equal(done.type, 'done')
-    assert.equal(done.entry.answer, ANSWER)
+    assert.equal(done.entry.answer, EXPLAIN_BODY)
     assert.equal(done.entry.docId, doc.id)
     assert.equal(done.entry.page, sel.page)
     assert.equal(done.entry.paraId, sel.paraId)
-    assert.equal(done.entry.recipe, 'v1')
+    assert.equal(done.entry.recipe, 'v2')
+    assert.equal(done.entry.kind, 'explain')
     assert.equal(done.entry.provider, 'deepseek-official')
     assert.equal(done.entry.model, 'deepseek-v4-flash')
     assert.equal(done.entry.hitCount, 0)
@@ -343,6 +356,7 @@ describe('宿主路由（真实抽取 + 假 llm）', () => {
     assert.equal(llm.calls[0].maxTokens, 1600)
     assert.match(llm.calls[0].system, /学术论文阅读助教/)
     assert.match(llm.calls[0].system, /### 1\. 中译/)
+    assert.match(llm.calls[0].system, /<!--terms:/)
     assert.equal(llm.calls[0].messages[0].role, 'user')
     assert.equal(llm.calls[0].messages[0].content[0].type, 'text')
     assert.match(llm.calls[0].messages[0].content[0].text, /论文：/)
@@ -397,9 +411,171 @@ describe('宿主路由（真实抽取 + 假 llm）', () => {
     assert.equal(body.index.length, 2)
     const sentRange = structure.paras.find(item => item.id === sel.paraId).sent[0]
     for (const item of body.index) {
-      assert.deepEqual(Object.keys(item).sort(), ['createdAt', 'hitCount', 'id', 'key', 'page', 'paraId', 'recipe', 'selText', 'sent'])
+      assert.deepEqual(Object.keys(item).sort(), ['createdAt', 'hitCount', 'id', 'key', 'kind', 'page', 'paraId', 'recipe', 'selText', 'sent'])
+      assert.equal(item.kind, 'explain')
       assert.deepEqual(item.sent, sentRange)
     }
+  })
+
+  it('v2 术语表：两次解释后按 key 累积，terms.md 可导出', async () => {
+    const res = await call(app, { url: `${PREFIX}/api/docs/${doc.id}/terms` })
+    assert.equal(res.statusCode, 200)
+    assert.match(res.headers['content-type'], /application\/json/)
+    const body = json(res)
+    assert.equal(body.terms.length, 1, 'fake llm 的 trailer 只给了 attention 一个术语')
+    const term = body.terms[0]
+    assert.equal(term.key, 'attention')
+    assert.equal(term.term, 'attention')
+    assert.equal(term.zh, '注意力')
+    assert.equal(term.count, 2, '首次解释 + force 重新解释各累积一次；缓存命中不累积')
+    assert.equal(term.page, sel.page)
+    assert.equal(term.paraId, sel.paraId)
+    assert.match(term.firstEntryId, /^e_/)
+    assert.ok(term.updatedAt)
+
+    const md = await call(app, { url: `${PREFIX}/api/docs/${doc.id}/terms.md` })
+    assert.equal(md.statusCode, 200)
+    assert.equal(md.headers['content-type'], 'text/markdown; charset=utf-8')
+    const text = md.body.toString('utf8')
+    assert.match(text, /· 术语表/)
+    assert.match(text, /\| 术语 \| 中文 \| 说明 \| 出现次数 \|/)
+    assert.match(text, /\| attention \| 注意力 \| 按相关性加权求和的机制 \| 2 \|/)
+  })
+
+  it('POST /api/translate：kind=translate、纯译文、目标语言中文、命中缓存', async () => {
+    const para = structure.paras.find(item => item.id === 'p16')
+    const before = llm.calls.length
+    const res = await call(app, {
+      method: 'POST',
+      url: `${PREFIX}/api/translate`,
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ docId: doc.id, paraId: 'p16' }),
+    })
+    const events = parseSse(res)
+    assert.equal(events[0].type, 'meta')
+    assert.equal(events[0].kind, 'translate')
+    assert.equal(events[0].cached, false)
+    const deltas = events.filter(event => event.type === 'delta')
+    assert.equal(deltas.map(event => event.text).join(''), TRANSLATE_ANSWER)
+    const done = events.at(-1)
+    assert.equal(done.type, 'done')
+    assert.equal(done.entry.kind, 'translate')
+    assert.equal(done.entry.recipe, 'translate-v1')
+    assert.equal(done.entry.paraId, 'p16')
+    assert.equal(done.entry.page, para.page)
+    assert.equal(done.entry.answer, TRANSLATE_ANSWER)
+    assert.equal('sent' in done.entry, false)
+    assert.equal('rect' in done.entry, false)
+    assert.equal(llm.calls.length, before + 1)
+    assert.match(llm.calls.at(-1).system, /译成中文/)
+
+    const cached = parseSse(await call(app, {
+      method: 'POST',
+      url: `${PREFIX}/api/translate`,
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ docId: doc.id, paraId: 'p16' }),
+    }))
+    assert.deepEqual(cached.map(event => event.type), ['meta', 'done'])
+    assert.equal(cached[0].cached, true)
+    assert.equal(cached[0].kind, 'translate')
+    assert.equal(cached[0].hitCount, 1)
+    assert.equal(llm.calls.length, before + 1, '缓存命中不得再调模型')
+  })
+
+  it('POST /api/translate 参数错误：缺 paraId / 段落不存在 / 未知文档', async () => {
+    const missing = await call(app, {
+      method: 'POST',
+      url: `${PREFIX}/api/translate`,
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ docId: doc.id }),
+    })
+    assert.equal(missing.statusCode, 400)
+    assert.equal(json(missing).error.code, 'bad-request')
+    const ghostPara = await call(app, {
+      method: 'POST',
+      url: `${PREFIX}/api/translate`,
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ docId: doc.id, paraId: 'p9999' }),
+    })
+    assert.equal(ghostPara.statusCode, 400)
+    const ghostDoc = await call(app, {
+      method: 'POST',
+      url: `${PREFIX}/api/translate`,
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ docId: 'ffffffffffffffff', paraId: 'p16' }),
+    })
+    assert.equal(ghostDoc.statusCode, 404)
+    assert.equal(json(ghostDoc).error.code, 'not-found')
+  })
+
+  it('POST /api/explain-region：抽区域文字层 + kind=region + rect，命中缓存', async () => {
+    const para = structure.paras.find(item => item.page === 4 && /softmax/i.test(item.text))
+    assert.ok(para, '第 4 页应有 softmax 公式段')
+    const before = llm.calls.length
+    const res = await call(app, {
+      method: 'POST',
+      url: `${PREFIX}/api/explain-region`,
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ docId: doc.id, page: 4, rect: para.bbox }),
+    })
+    const events = parseSse(res)
+    assert.equal(events[0].type, 'meta')
+    assert.equal(events[0].kind, 'region')
+    assert.equal(events[0].cached, false)
+    const done = events.at(-1)
+    assert.equal(done.type, 'done')
+    assert.equal(done.entry.kind, 'region')
+    assert.equal(done.entry.recipe, 'region-v1')
+    assert.equal(done.entry.page, 4)
+    assert.equal(done.entry.rect.length, 4)
+    assert.match(done.entry.regionText, /softmax/i)
+    assert.ok(Array.isArray(done.entry.rect), 'region 条目必须带 rect')
+    const indexRes = await call(app, { method: 'GET', url: `${PREFIX}/api/docs/${doc.id}/explanations?index=1` })
+    const regionIndex = JSON.parse(indexRes.body).index.find((row) => row.id === done.entry.id)
+    assert.ok(regionIndex, 'region 条目应出现在精简索引里')
+    assert.deepEqual(regionIndex.rect, done.entry.rect, '精简索引必须带 rect，原文区域框靠它定位')
+    assert.equal(done.entry.answer, REGION_ANSWER)
+    assert.equal(llm.calls.length, before + 1)
+    assert.match(llm.calls.at(-1).system, /框选/)
+
+    const cached = parseSse(await call(app, {
+      method: 'POST',
+      url: `${PREFIX}/api/explain-region`,
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ docId: doc.id, page: 4, rect: para.bbox }),
+    }))
+    assert.deepEqual(cached.map(event => event.type), ['meta', 'done'])
+    assert.equal(cached[0].cached, true)
+    assert.equal(cached[0].kind, 'region')
+    assert.equal(cached[0].hitCount, 1)
+    assert.equal(llm.calls.length, before + 1)
+  })
+
+  it('POST /api/explain-region 参数校验：rect 越界/顺序/页码/未知文档', async () => {
+    const cases = [
+      { page: 4, rect: [10, 10, 5, 5] },
+      { page: 99, rect: [10, 10, 20, 20] },
+      { page: 4, rect: [-5, 0, 100, 100] },
+      { page: 4, rect: [10, 10, 100] },
+    ]
+    for (const sel of cases) {
+      const res = await call(app, {
+        method: 'POST',
+        url: `${PREFIX}/api/explain-region`,
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ docId: doc.id, ...sel }),
+      })
+      assert.equal(res.statusCode, 400, JSON.stringify(sel))
+      assert.equal(json(res).error.code, 'bad-request')
+    }
+    const ghost = await call(app, {
+      method: 'POST',
+      url: `${PREFIX}/api/explain-region`,
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ docId: 'ffffffffffffffff', page: 1, rect: [10, 10, 100, 100] }),
+    })
+    assert.equal(ghost.statusCode, 404)
+    assert.equal(json(ghost).error.code, 'not-found')
   })
 
   it('缺 sel.page 时按 paraId 反查页码；选句定位不到则不写 sent', async () => {
@@ -495,6 +671,47 @@ describe('宿主路由（真实抽取 + 假 llm）', () => {
     assert.equal(unknown.statusCode, 404)
     const wrongMethod = await call(app, { method: 'POST', url: `${PREFIX}/api/health` })
     assert.equal(wrongMethod.statusCode, 405)
+  })
+
+  it('老 v1 条目兼容：读接口补 kind=explain，磁盘不迁移、不报错', async () => {
+    const legacy = {
+      id: 'e_legacy00000001',
+      key: sha256('legacy-key'),
+      recipe: 'v1',
+      // 注意：故意不写 kind，模拟 v1 时代落盘的旧条目
+      selText: '老选句',
+      normText: '老选句',
+      docId: doc.id,
+      page: 2,
+      paraId: 'p16',
+      sectionId: 's2',
+      contextHash: 'legacy-context',
+      provider: 'deepseek-official',
+      model: 'deepseek-v4-flash',
+      answer: '旧解释正文',
+      createdAt: '2026-01-01T00:00:00.000Z',
+      hitCount: 0,
+      lastHitAt: null,
+      supersedes: null,
+    }
+    await appendExplanation(doc.id, legacy, env)
+
+    const full = json(await call(app, { url: `${PREFIX}/api/docs/${doc.id}/explanations` }))
+    const saved = full.entries.find(entry => entry.id === legacy.id)
+    assert.ok(saved)
+    assert.equal(saved.kind, 'explain')
+    assert.equal(saved.recipe, 'v1')
+
+    const index = json(await call(app, { url: `${PREFIX}/api/docs/${doc.id}/explanations?index=1` })).index
+    const projected = index.find(entry => entry.id === legacy.id)
+    assert.equal(projected.kind, 'explain')
+    assert.equal('sent' in projected, false)
+
+    const onDisk = JSON.parse(await readFile(
+      path.join(env.DSH_HOME, 'plugin-data', 'paper-reader', 'docs', doc.id, 'explanations.json'),
+      'utf8',
+    ))
+    assert.equal('kind' in onDisk.entries.find(entry => entry.id === legacy.id), false, '读时补 kind，不改磁盘数据')
   })
 })
 

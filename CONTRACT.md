@@ -98,7 +98,7 @@ $DSH_HOME/plugin-data/paper-reader/      # 默认 ~/.dsh/plugin-data/paper-reade
 查询参数 `?index=1` 时返回精简版（供原文标记用）：
 ```json
 { "index": [ { "id":"e_ab12","key":"...","paraId":"p12","page":3,"selText":"原句",
-               "sent":[120,260],"createdAt":"ISO","hitCount":3,"recipe":"v1" } ] }
+               "sent":[120,260],"kind":"explain","createdAt":"ISO","hitCount":3,"recipe":"v2" } ] }
 ```
 - `sent` 可选：该解释在段落文本里的字符区间 `[start,end)`，用于原文标记精确定位；跨句/跨段等定位不到时不出现，客户端回退为 `selText` 搜索。
 
@@ -121,6 +121,31 @@ data: {"type":"done","entry":{...}}
 data: {"type":"error","code":"llm-failed","message":"..."}
 ```
 规则：**只有完整成功才落盘**；中途断开不写缓存；`force:true` 时新增一条 `supersedes`。
+
+### `POST /api/translate`
+整段翻译。请求：`{ "docId": "...", "paraId": "p16", "force": false }`
+响应与 `/api/explain` 完全相同的 SSE 事件形状；`meta` 里 `kind:"translate"`，
+`done.entry.kind = "translate"`、`done.entry.paraId` 为目标段落。
+目标语言自动判定：段落 CJK 占比 < 0.5 → 译成中文；≥ 0.5 → 译成英文。
+输出为纯 Markdown 译文（无三段式、无解说），公式符号按原文保留。
+
+### `POST /api/explain-region`
+框选区域（公式/图）解释。请求：
+`{ "docId": "...", "page": 4, "rect": [x0,y0,x1,y1], "force": false }`（rect 为 PDF 点坐标，原点左上）
+响应同上 SSE；`meta.kind = "region"`；`done.entry.kind = "region"`，并带 `rect` 与 `regionText`。
+宿主用 PyMuPDF 的 `clip` 抽取该区域文字层，并用与区域相交最多的段落作为上下文。
+区域没有文字层时不报错，模型只能依据上下文推测（回答里会说明）。
+
+### `GET /api/docs/<id>/terms`
+术语表（由解释结果自动累积）。
+```json
+{ "terms": [ { "key":"transduction","term":"Transduction","zh":"转导","note":"把输入序列映射为另一序列的任务",
+               "count":2,"page":2,"paraId":"p16","firstEntryId":"e_ab12","updatedAt":"ISO" } ] }
+```
+`count` 是该术语在本论文解释里出现的次数；按 `count` 降序、`updatedAt` 降序。
+
+### `GET /api/docs/<id>/terms.md`
+`text/markdown; charset=utf-8`，术语表导出（标题 = 论文名，表格：术语 / 中文 / 说明 / 出现次数）。
 
 ### `GET/POST /api/ui-state`
 ```json
@@ -189,7 +214,14 @@ norm(text) = text
   .trim()
 key = sha256(docId + '|' + recipe + '|' + norm(text) + '|' + paraId)
 ```
-`recipe = 'v1'`。改提示词必须同时升 `recipe`。
+`recipe = 'v2'`（解释）、`translate-v1`（整段翻译）、`region-v1`（框选区域）。改提示词必须同时升版本号。
+
+三类缓存键：
+```
+explain   : sha256(docId + '|v2|' + norm(selection) + '|' + paraId)
+translate : sha256(docId + '|translate-v1|' + paraId + '|' + sha1(paraText))
+region    : sha256(docId + '|region-v1|' + page + '|' + rectRound1pt + '|' + sha1(regionText))
+```
 
 ## 6. 解释提示词（recipe v1）
 
@@ -205,7 +237,14 @@ system：
 ### 3. 在论证中的位置
 （2-4 行：这句话在所在段落和章节里承担什么作用，和上下文怎么衔接）
 不要输出开场白、总结、免责声明。
+
+正文结束后，另起一行输出且仅输出这一行机器可读注释（供术语表累积，用户看不到）：
+<!--terms:{"terms":[{"term":"英文原词或符号","zh":"中文译名","note":"一句话说明"}]}-->
+术语取本节解释里真正影响理解的 1-4 个；没有就给 {"terms":[]}。
 ```
+> 版本：`recipe = "v2"`。宿主会在流式输出里扣住 `<!--terms:` 起点到 `-->` 结束的片段，
+> 不把它发给客户端；完整结束后解析、从 `answer` 里剔除，并把术语并入 `terms.json`。
+> 解析失败不影响解释落盘（`terms` 视为空）。
 
 user：
 ```

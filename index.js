@@ -30,12 +30,14 @@ import {
   readIndex,
   readPage,
   readStructure,
+  readTerms,
   readUiState,
+  renderTermsMarkdown,
   storeDir,
   updateUiState,
 } from './store.js'
 import { ingestBytes, ingestPath, probePython, readJsonBody, readRequestBody } from './ingest.js'
-import { serveExplain } from './explain.js'
+import { serveExplain, serveRegion, serveTranslate } from './explain.js'
 
 const HERE = path.dirname(fileURLToPath(import.meta.url))
 
@@ -218,7 +220,11 @@ export function createApp({ ctx, config = {}, env = process.env }) {
   async function handleExplanations(req, res, id) {
     const structure = await readStructure(id, env)
     if (!structure) throw new PaperError('not-found', `找不到文档：${id}`, 404)
-    const entries = await readExplanations(id, env)
+    const entries = (await readExplanations(id, env)).map(entry => ({
+      // 兼容老数据：v1 条目没有 kind，读的时候一律按 explain 处理（不迁移、不报错）
+      ...entry,
+      kind: entry.kind ?? 'explain',
+    }))
     const url = new URL(req.url ?? '/', 'http://localhost')
     if (url.searchParams.get('index') === '1') {
       respondJson(res, 200, {
@@ -231,13 +237,37 @@ export function createApp({ ctx, config = {}, env = process.env }) {
           createdAt: entry.createdAt,
           hitCount: entry.hitCount,
           recipe: entry.recipe,
+          kind: entry.kind,
           // 可选：段内字符区间（定位不到的解释条目没有这个字段）
           sent: entry.sent,
+          // 可选：框选区域（kind=region 时用于在原文上画区域框）
+          rect: entry.rect,
         })),
       })
       return
     }
     respondJson(res, 200, { entries })
+  }
+
+  /** GET /api/docs/<id>/terms：术语表（按 count 降序、updatedAt 降序）。 */
+  async function handleTerms(req, res, id) {
+    const structure = await readStructure(id, env)
+    if (!structure) throw new PaperError('not-found', `找不到文档：${id}`, 404)
+    respondJson(res, 200, { terms: await readTerms(id, env) })
+  }
+
+  /** GET /api/docs/<id>/terms.md：术语表 Markdown 导出。 */
+  async function handleTermsMarkdown(req, res, id) {
+    const structure = await readStructure(id, env)
+    if (!structure) throw new PaperError('not-found', `找不到文档：${id}`, 404)
+    const markdown = renderTermsMarkdown({ title: structure.title }, await readTerms(id, env))
+    const buffer = Buffer.from(markdown, 'utf8')
+    res.writeHead(200, {
+      'content-type': 'text/markdown; charset=utf-8',
+      'cache-control': 'no-store',
+      'content-length': buffer.length,
+    })
+    res.end(buffer)
   }
 
   async function handleMedia(req, res, id, n) {
@@ -309,6 +339,16 @@ export function createApp({ ctx, config = {}, env = process.env }) {
       await serveExplain({ ctx, config: cfg, env, req, res })
       return
     }
+    if (pathname === '/api/translate') {
+      if (method !== 'POST') return methodNotAllowed(res, method)
+      await serveTranslate({ ctx, config: cfg, env, req, res })
+      return
+    }
+    if (pathname === '/api/explain-region') {
+      if (method !== 'POST') return methodNotAllowed(res, method)
+      await serveRegion({ ctx, config: cfg, env, req, res })
+      return
+    }
     if (pathname === '/api/ui-state') {
       if (method === 'GET') {
         respondJson(res, 200, await readUiState(env))
@@ -329,6 +369,16 @@ export function createApp({ ctx, config = {}, env = process.env }) {
     if (media) {
       if (method !== 'GET') return methodNotAllowed(res, method)
       return handleMedia(req, res, media[1], Number(media[2]))
+    }
+    const termsMd = /^\/api\/docs\/([0-9a-f]{16})\/terms\.md$/.exec(pathname)
+    if (termsMd) {
+      if (method !== 'GET') return methodNotAllowed(res, method)
+      return handleTermsMarkdown(req, res, termsMd[1])
+    }
+    const terms = /^\/api\/docs\/([0-9a-f]{16})\/terms$/.exec(pathname)
+    if (terms) {
+      if (method !== 'GET') return methodNotAllowed(res, method)
+      return handleTerms(req, res, terms[1])
     }
     const structure = /^\/api\/docs\/([0-9a-f]{16})\/structure$/.exec(pathname)
     if (structure) {

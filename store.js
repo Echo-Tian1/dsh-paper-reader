@@ -14,8 +14,12 @@ import { promises as fsp } from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
 
-/** 解释配方版本；改提示词必须同时升版本（CONTRACT §5）。 */
-export const RECIPE = 'v1'
+/** 解释配方版本（v2 起输出 terms trailer）；改提示词必须同时升版本（CONTRACT §5）。 */
+export const RECIPE = 'v2'
+/** 整段翻译配方版本。 */
+export const TRANSLATE_RECIPE = 'translate-v1'
+/** 框选区域解释配方版本。 */
+export const REGION_RECIPE = 'region-v1'
 
 /** 文档 id 形如 sha256(pdf 字节).slice(0,16)，小写十六进制。 */
 const DOC_ID_RE = /^[0-9a-f]{16}$/
@@ -103,6 +107,11 @@ export function sha256Bytes(buffer) {
   return createHash('sha256').update(buffer).digest('hex')
 }
 
+/** sha1 十六进制（translate/region 缓存键里对长文本取摘要，契约指定）。 */
+export function sha1(text) {
+  return createHash('sha1').update(String(text ?? ''), 'utf8').digest('hex')
+}
+
 /**
  * 选句归一化（CONTRACT §5）：
  *  - 行尾连字符断行还原（"transduc-\ntion" -> "transduction"）；
@@ -120,6 +129,60 @@ export function norm(text) {
 /** 按句缓存键：sha256(docId + '|' + recipe + '|' + normText + '|' + paraId)。 */
 export function cacheKey(docId, recipe, normText, paraId) {
   return sha256(`${docId}|${recipe}|${normText}|${paraId}`)
+}
+
+/** 整段翻译缓存键：sha256(docId|translate-v1|paraId|sha1(paraText))。 */
+export function translateKey(docId, paraId, paraText) {
+  return sha256(`${docId}|${TRANSLATE_RECIPE}|${paraId}|${sha1(paraText)}`)
+}
+
+/** rect 取整到 0.1pt，拼成稳定的字符串（region 缓存键的一部分）。 */
+export function roundRect1(rect) {
+  if (!Array.isArray(rect) || rect.length !== 4) return String(rect)
+  return rect
+    .map(value => {
+      const number = Number(value)
+      return String(Number.isFinite(number) ? Math.round(number * 10) / 10 : value)
+    })
+    .join(',')
+}
+
+/** 框选区域缓存键：sha256(docId|region-v1|page|rect 取整 0.1pt|sha1(regionText))。 */
+export function regionKey(docId, page, rect, regionText) {
+  return sha256(`${docId}|${REGION_RECIPE}|${page}|${roundRect1(rect)}|${sha1(regionText)}`)
+}
+
+/** 单个字符是否算 CJK（汉字 / 中文标点 / 全角）。 */
+export function isCjkChar(char) {
+  if (!char) return false
+  const code = char.codePointAt(0)
+  return (
+    (code >= 0x4e00 && code <= 0x9fff)
+    || (code >= 0x3400 && code <= 0x4dbf)
+    || (code >= 0x3000 && code <= 0x303f)
+    || (code >= 0xff00 && code <= 0xffef)
+    || (code >= 0x3040 && code <= 0x30ff)
+    || (code >= 0xac00 && code <= 0xd7af)
+  )
+}
+
+/** CJK 字符占比（忽略空白；无内容返回 0）。翻译目标语言判定用。 */
+export function cjkRatio(text) {
+  const value = String(text ?? '')
+  let cjk = 0
+  let other = 0
+  for (const char of value) {
+    if (/\s/.test(char)) continue
+    if (isCjkChar(char)) cjk += 1
+    else other += 1
+  }
+  const total = cjk + other
+  return total === 0 ? 0 : cjk / total
+}
+
+/** 目标语言：CJK 占比 < 0.5 → 译成中文（zh）；≥ 0.5 → 译成英文（en）。 */
+export function targetLanguage(text) {
+  return cjkRatio(text) < 0.5 ? 'zh' : 'en'
 }
 
 /** 上下文哈希：配方 + system + user 文本，用于历史里判断上下文是否变过。 */
@@ -252,6 +315,100 @@ export async function updateExplanation(docId, id, patch, env = process.env) {
 export async function countExplained(docId, env = process.env) {
   const entries = await readExplanations(docId, env)
   return entries.length
+}
+
+// ---------------------------------------------------------------------------
+// 术语表 terms.json（由解释结果的 terms trailer 自动累积）
+// ---------------------------------------------------------------------------
+
+export function termsPath(docId, env = process.env) {
+  return path.join(docDir(docId, env), 'terms.json')
+}
+
+/** 读术语表；按 count 降序、updatedAt 降序（CONTRACT §2 GET /terms）。 */
+export async function readTerms(docId, env = process.env) {
+  const raw = await readJson(termsPath(docId, env), null)
+  const list = Array.isArray(raw) ? raw : (raw && Array.isArray(raw.terms) ? raw.terms : [])
+  return list
+    .filter(item => item && typeof item.key === 'string' && item.key)
+    .sort((left, right) => {
+      const byCount = (Number(right.count) || 0) - (Number(left.count) || 0)
+      if (byCount !== 0) return byCount
+      return (Date.parse(right.updatedAt ?? '') || 0) - (Date.parse(left.updatedAt ?? '') || 0)
+    })
+}
+
+export async function writeTerms(docId, terms, env = process.env) {
+  await writeJsonAtomic(termsPath(docId, env), { version: 1, terms })
+  return terms
+}
+
+/**
+ * 合并一批术语：按 key 累加 count，保留首次出现位置（page/paraId/firstEntryId），
+ * 已有中文/说明为空时用新的补上，updatedAt 每次刷新。
+ * @param {string} docId 文档 id
+ * @param {{term:string,zh?:string,note?:string}[]} terms 本轮解释解析出的术语
+ * @param {{entryId?:string,page?:number,paraId?:string}} meta 来源条目信息
+ */
+export async function mergeTerms(docId, terms, meta = {}, env = process.env) {
+  const existing = await readTerms(docId, env)
+  const byKey = new Map(existing.map(item => [item.key, item]))
+  const now = new Date().toISOString()
+  for (const raw of Array.isArray(terms) ? terms : []) {
+    const term = String(raw?.term ?? '').trim()
+    if (!term) continue
+    const key = term.toLowerCase()
+    const zh = String(raw?.zh ?? '').trim()
+    const note = String(raw?.note ?? '').trim()
+    const previous = byKey.get(key)
+    if (previous) {
+      previous.count = (Number(previous.count) || 0) + 1
+      if (!previous.zh && zh) previous.zh = zh
+      if (!previous.note && note) previous.note = note
+      previous.updatedAt = now
+      continue
+    }
+    const entry = {
+      key,
+      term,
+      zh,
+      note,
+      count: 1,
+      page: Number.isInteger(meta.page) ? meta.page : null,
+      paraId: typeof meta.paraId === 'string' ? meta.paraId : '',
+      firstEntryId: typeof meta.entryId === 'string' ? meta.entryId : '',
+      updatedAt: now,
+    }
+    byKey.set(key, entry)
+  }
+  const merged = Array.from(byKey.values())
+  await writeTerms(docId, merged, env)
+  return readTerms(docId, env)
+}
+
+function markdownCell(value) {
+  return String(value ?? '').replace(/\|/g, '\\|').replace(/\s*\n\s*/g, ' ').trim()
+}
+
+/** 术语表导出 Markdown（标题 = 论文名；表格：术语 / 中文 / 说明 / 出现次数）。 */
+export function renderTermsMarkdown(doc, terms) {
+  const title = String(doc?.title ?? '').trim() || '论文'
+  const list = Array.isArray(terms) ? terms : []
+  const lines = [
+    `# ${title} · 术语表`,
+    '',
+    `共 ${list.length} 条术语（按出现次数排序）。`,
+    '',
+    '| 术语 | 中文 | 说明 | 出现次数 |',
+    '| --- | --- | --- | --- |',
+  ]
+  for (const item of list) {
+    lines.push(`| ${markdownCell(item.term)} | ${markdownCell(item.zh)} | ${markdownCell(item.note)} | ${Number(item.count) || 0} |`)
+  }
+  lines.push('')
+  lines.push('> 由文献阅读坞在解释过程中自动累积。')
+  lines.push('')
+  return lines.join('\n')
 }
 
 // ---------------------------------------------------------------------------

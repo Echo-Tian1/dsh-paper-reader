@@ -827,3 +827,270 @@ button { font-family: inherit; }
   .brand { display: none; }
   .docs-select { max-width: 120px; }
 }
+
+/* ============================================================
+   v2：术语 / 翻译 / 框选区域
+   ============================================================ */
+
+/* ---------- 顶栏快捷键提示 ---------- */
+.region-shortcut {
+  flex: 0 0 auto;
+  font-size: 11px;
+  color: var(--pr-muted);
+  border: 1px solid var(--pr-border);
+  border-radius: 6px;
+  padding: 2px 7px;
+  white-space: nowrap;
+  user-select: none;
+}
+
+/* ---------- 工具条按钮禁用 ---------- */
+.tb-btn:disabled {
+  opacity: 0.38;
+  cursor: default;
+  background: transparent;
+}
+
+.region-toolbar .tb-hint {
+  padding: 0 7px;
+  font-size: 11px;
+  color: var(--pr-muted);
+  white-space: nowrap;
+}
+
+/* ---------- Shift 框选橡皮筋（在 .page 内，随之缩放） ---------- */
+.region-layer {
+  position: absolute;
+  inset: 0;
+  z-index: 3;
+  pointer-events: none;
+  overflow: hidden;
+}
+
+.region-box {
+  position: absolute;
+  border: 2px dashed var(--pr-brand);
+  background: color-mix(in srgb, var(--pr-brand) 10%, transparent);
+  border-radius: 2px;
+  pointer-events: none;
+  box-sizing: border-box;
+}
+
+.region-box.too-small {
+  border-color: var(--pr-muted);
+  border-style: dotted;
+  background: transparent;
+}
+
+.region-box.active {
+  border-style: solid;
+  background: color-mix(in srgb, var(--pr-brand) 14%, transparent);
+}
+
+.region-box.pr-region-flash {
+  animation: pr-region-flash 1.3s ease-out 1;
+}
+@keyframes pr-region-flash {
+  0% { background: color-mix(in srgb, var(--pr-brand) 55%, transparent); }
+  100% { background: transparent; }
+}
+
+/* 拖动时禁用文字选择，光标变十字 */
+body.region-dragging .paper-scroll,
+body.region-dragging .text-layer,
+body.region-dragging .text-layer span {
+  user-select: none !important;
+  -webkit-user-select: none !important;
+  cursor: crosshair;
+}
+
+/* 已解释区域：原文上的淡色矩形框（可点回看） */
+.region-mark {
+  position: absolute;
+  margin: 0;
+  padding: 0;
+  border: 1.5px solid var(--pr-brand-strong);
+  background: color-mix(in srgb, var(--pr-brand) 7%, transparent);
+  border-radius: 2px;
+  pointer-events: auto;
+  cursor: pointer;
+  z-index: 2;
+  box-sizing: border-box;
+  transition: background 0.12s ease, border-color 0.12s ease;
+}
+.region-mark:hover {
+  background: color-mix(in srgb, var(--pr-brand) 16%, transparent);
+  border-color: var(--pr-brand);
+}
+.region-mark.pr-flash {
+  animation: pr-region-flash 1.3s ease-out 1;
+}
+
+/* ---------- 线程：kind 标题 / 缩略图 / 可折叠原文 ---------- */
+.thread-sel-label {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--pr-fg);
+  margin-bottom: 2px;
+}
+.thread-sel-label .badge { font-weight: 500; }
+
+.badge-translate {
+  background: color-mix(in srgb, var(--pr-brand) 14%, var(--pr-bg));
+  color: var(--pr-brand);
+  border-color: transparent;
+}
+.badge-region {
+  background: color-mix(in srgb, var(--pr-ok) 12%, var(--pr-bg));
+  color: var(--pr-ok);
+  border-color: color-mix(in srgb, var(--pr-ok) 26%, transparent);
+}
+
+.thread-source {
+  border: 1px solid var(--pr-border);
+  border-radius: 8px;
+  background: var(--pr-soft);
+  margin: 0;
+  padding: 0;
+  font-size: 12px;
+  line-height: 1.6;
+}
+.thread-source > summary {
+  cursor: pointer;
+  padding: 7px 10px;
+  color: var(--pr-muted);
+  font-size: 11.5px;
+  user-select: none;
+}
+.thread-source[open] > summary { border-bottom: 1px solid var(--pr-border); }
+.thread-source > div {
+  padding: 8px 10px;
+  max-height: 220px;
+  overflow-y: auto;
+  white-space: pre-wrap;
+  word-break: break-word;
+  color: var(--pr-fg);
+}
+
+.thread-thumb {
+  border: 1px solid var(--pr-border);
+  border-radius: 8px;
+  overflow: hidden;
+  background: var(--pr-soft);
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+}
+.thread-thumb img {
+  display: block;
+  width: 100%;
+  max-height: 240px;
+  object-fit: contain;
+  background: #fff;
+}
+.thread-thumb-label {
+  align-self: flex-start;
+  margin: 6px 8px 0;
+  padding: 1px 7px;
+  border-radius: 5px;
+  font-size: 10.5px;
+  line-height: 1.5;
+  color: var(--pr-muted);
+  background: var(--pr-bg);
+  border: 1px solid var(--pr-border);
+  pointer-events: none;
+}
+.thread-thumb-fallback {
+  color: var(--pr-muted);
+  font-size: 11.5px;
+  padding: 18px 10px;
+  text-align: center;
+}
+
+.thread-extra-meta {
+  font-size: 11px;
+  color: var(--pr-muted);
+  word-break: break-all;
+}
+
+/* ---------- 术语 tab ---------- */
+.terms-head {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 10px 12px;
+  border-bottom: 1px solid var(--pr-border);
+  background: var(--pr-bg);
+}
+.terms-head-title { font-size: 12px; font-weight: 600; color: var(--pr-muted); }
+
+.terms-list {
+  display: flex;
+  flex-direction: column;
+  padding: 8px 10px 28px;
+  gap: 5px;
+}
+
+.terms-item {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  text-align: left;
+  border: 1px solid transparent;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--pr-fg);
+  padding: 8px 10px;
+  font-family: inherit;
+  cursor: pointer;
+}
+.terms-item:hover { background: var(--pr-hover); border-color: var(--pr-border); }
+
+.terms-item-top {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.terms-term { font-size: 13px; font-weight: 600; }
+.terms-zh {
+  font-size: 12px;
+  color: var(--pr-brand);
+  padding: 0 6px;
+  border-radius: 5px;
+  background: var(--pr-brand-soft);
+}
+.terms-count {
+  margin-left: auto;
+  font-size: 11px;
+  color: var(--pr-muted);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+.terms-note {
+  font-size: 12px;
+  line-height: 1.6;
+  color: var(--pr-muted);
+  word-break: break-word;
+}
+.terms-meta {
+  font-size: 10.5px;
+  color: var(--pr-muted);
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.terms-empty {
+  color: var(--pr-muted);
+  font-size: 12px;
+  line-height: 1.7;
+  padding: 26px 12px;
+  text-align: center;
+}

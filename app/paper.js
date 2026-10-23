@@ -46,6 +46,18 @@ export function normalizeSelectedText(text) {
     .trim();
 }
 
+/** 选区工具条状态机：决定「解释 / 译本段 / 复制 / 取消」是否可用。 */
+export function selectionActionState(info) {
+  const hasText = !!(info && info.text);
+  const hasPara = !!(info && info.paraId);
+  return {
+    explain: hasText,
+    translate: hasText && hasPara,
+    copy: hasText,
+    cancel: true,
+  };
+}
+
 /** 在段落原文里定位选句的字符区间 [start,end)；找不到返回 null。 */
 export function locateRange(paraText, sentRanges, selText) {
   const text = String(paraText || '');
@@ -154,9 +166,15 @@ function bboxBox(bbox) {
   return { left: x0, top: y0, width: Math.max(1, x1 - x0), height: Math.max(1, y1 - y0) };
 }
 
-/** 计算选句在页上的高亮矩形（PDF 点坐标，按行分组）；定位失败时退回整段 bbox。 */
-export function markBoxes(para, words, selText) {
-  const range = locateRange(para?.text, para?.sent, selText);
+/** 计算选句在页上的高亮矩形（PDF 点坐标，按行分组）；定位失败时退回整段 bbox。
+ *  forcedRange: 契约 ?index=1 里可选的 `sent:[start,end]`，有则优先用（比 selText 搜索精确）。
+ */
+export function markBoxes(para, words, selText, forcedRange) {
+  const forced =
+    Array.isArray(forcedRange) && forcedRange.length === 2 && forcedRange[0] < forcedRange[1]
+      ? [Number(forcedRange[0]), Number(forcedRange[1])]
+      : null;
+  const range = forced || locateRange(para?.text, para?.sent, selText);
   const list = Array.isArray(words) ? words : [];
   if (!range) return para?.bbox ? [bboxBox(para.bbox)].filter(Boolean) : [];
 
@@ -201,6 +219,78 @@ export function markBoxes(para, words, selText) {
   return groups;
 }
 
+// ---------- v2 纯函数：框选坐标 / 缩略图裁剪 ----------
+
+function clamp(value, min, max) {
+  return Math.min(Math.max(value, min), max);
+}
+
+function round1(value) {
+  return Math.round(Number(value) * 10) / 10;
+}
+
+/**
+ * 屏幕坐标 → PDF 点坐标。
+ * .page 是固定 pageW×pageH 再 transform: scale(s) 的容器，所以用 getBoundingClientRect()
+ * 拿屏幕矩形反算：pdfX = (clientX - rect.left) * pageW / rect.width。
+ * 滚动只影响 rect，因此公式天然含滚动偏移；窗口缩放改变 rect 也同样成立。
+ * 纯函数（pageEl 只需要提供 getBoundingClientRect），可在 Node 里用桩对象单测。
+ */
+export function clientToPdf(pageEl, clientX, clientY, pageW, pageH) {
+  const w = Number(pageW) || 612;
+  const h = Number(pageH) || 792;
+  const rect = pageEl && typeof pageEl.getBoundingClientRect === 'function' ? pageEl.getBoundingClientRect() : null;
+  if (!rect || !rect.width || !rect.height) return { x: 0, y: 0 };
+  const x = ((Number(clientX) - rect.left) * w) / rect.width;
+  const y = ((Number(clientY) - rect.top) * h) / rect.height;
+  return { x: clamp(x, 0, w), y: clamp(y, 0, h) };
+}
+
+/** 把 rect 归一化成左上→右下、保留 1 位小数的 [x0,y0,x1,y1]；非法返回 null。 */
+export function normalizeRegionRect(rect) {
+  if (!Array.isArray(rect) || rect.length !== 4) return null;
+  const nums = rect.map(Number);
+  if (!nums.every((n) => Number.isFinite(n))) return null;
+  const x0 = Math.min(nums[0], nums[2]);
+  const y0 = Math.min(nums[1], nums[3]);
+  const x1 = Math.max(nums[0], nums[2]);
+  const y1 = Math.max(nums[1], nums[3]);
+  return [round1(x0), round1(y0), round1(x1), round1(y1)];
+}
+
+/**
+ * 两点 → 归一化区域 + 是否太小（宽或高 < minSize PDF 点）。
+ * 太小直接取消，避免误框烧 token。
+ */
+export function rectFromPoints(start, end, options = {}) {
+  const minSize = Number.isFinite(options.minSize) ? options.minSize : 8;
+  const rect = normalizeRegionRect([start?.x, start?.y, end?.x, end?.y]);
+  if (!rect) return { rect: [0, 0, 0, 0], tooSmall: true };
+  const tooSmall = rect[2] - rect[0] < minSize || rect[3] - rect[1] < minSize;
+  return { rect, tooSmall };
+}
+
+/** 从 1.5x 页图里裁剪 rect 区域时，页图自然像素上的 source 矩形。 */
+export function thumbnailCrop(rect, pageW, pageH, naturalW, naturalH) {
+  const r = normalizeRegionRect(rect);
+  if (!r || !(pageW > 0) || !(pageH > 0) || !(naturalW > 0) || !(naturalH > 0)) return null;
+  const kx = naturalW / pageW;
+  const ky = naturalH / pageH;
+  return {
+    sx: r[0] * kx,
+    sy: r[1] * ky,
+    sw: Math.max(1, (r[2] - r[0]) * kx),
+    sh: Math.max(1, (r[3] - r[1]) * ky),
+  };
+}
+
+/** 「宽×高 pt」的人类可读尺寸。 */
+export function regionSizeLabel(rect) {
+  const r = normalizeRegionRect(rect);
+  if (!r) return '';
+  return `${Math.round(r[2] - r[0])}×${Math.round(r[3] - r[1])} pt`;
+}
+
 // ---------- 模块状态 ----------
 
 let deps = {
@@ -209,6 +299,7 @@ let deps = {
   onExplainSelection: null,
   onOpenEntry: null,
   onPageChange: null,
+  onRegionChange: null,
   toast: null,
 };
 
@@ -227,6 +318,9 @@ let selectListenerAdded = false;
 let scrollRaf = 0;
 let lastPage = 0;
 let pendingFlash = null;
+let pendingTerm = null;
+let region = null; // { page, pageEntry, rect, client }
+let regionDrag = null; // { pageEntry, start, lastRect, tooSmall }
 
 const scaleQueued = { value: false };
 
@@ -241,6 +335,7 @@ export function init(options = {}) {
   }
   if (scrollEl) {
     scrollEl.addEventListener('scroll', onScroll, { passive: true });
+    scrollEl.addEventListener('pointerdown', onPointerDown);
   }
   if (!selectListenerAdded && typeof document !== 'undefined') {
     document.addEventListener('mouseup', onDocumentMouseUp);
@@ -263,6 +358,9 @@ export async function load({ docId: id, structure: data, restore } = {}) {
   explanations = [];
   pages = [];
   pendingFlash = null;
+  pendingTerm = null;
+  if (regionDrag) endRegionDrag();
+  region = null;
   lastPage = 0;
   contentEl.innerHTML = '';
 
@@ -337,9 +435,7 @@ export async function load({ docId: id, structure: data, restore } = {}) {
 export function setExplanations(indexOrPayload) {
   const list = Array.isArray(indexOrPayload) ? indexOrPayload : indexOrPayload?.index;
   explanations = Array.isArray(list) ? list : [];
-  for (const page of pages) {
-    if (page.loadState === 'loaded') renderMarks(page);
-  }
+  for (const page of pages) renderMarks(page);
 }
 
 /** 新解释落盘后增量更新标记。 */
@@ -350,7 +446,7 @@ export function addExplanation(entry) {
   else explanations.push(entry);
   const para = paraById.get(entry.paraId);
   const page = pages.find((p) => p.n === (entry.page || para?.page));
-  if (page && page.loadState === 'loaded') renderMarks(page);
+  if (page) renderMarks(page);
 }
 
 export function destroy() {
@@ -487,6 +583,7 @@ function buildTextLayer(page) {
     span.style.fontSize = `${Math.max(1, (y1 - y0) * 0.92)}px`;
     span.dataset.para = paraId || '';
     span.dataset.page = String(page.n);
+    span.dataset.wi = String(i);
     fragment.appendChild(span);
   }
   page.textLayer.appendChild(fragment);
@@ -504,11 +601,39 @@ function renderMarks(page) {
   page.marksLayer.innerHTML = '';
   if (!explanations.length) return;
   for (const entry of explanations) {
-    if (!entry || !entry.paraId) continue;
+    if (!entry) continue;
+    const kind = entry.kind || 'explain';
+    // 整段翻译不画原文标记（否则会把整段都染色）
+    if (kind === 'translate') continue;
+
+    // 框选区域：按 entry.rect 画淡色矩形框，不依赖文字层
+    if (kind === 'region') {
+      const rect = normalizeRegionRect(entry.rect);
+      if (!rect || Number(entry.page) !== page.n) continue;
+      const width = rect[2] - rect[0];
+      const height = rect[3] - rect[1];
+      const mark = document.createElement('button');
+      mark.type = 'button';
+      mark.className = 'region-mark';
+      mark.style.left = `${rect[0]}px`;
+      mark.style.top = `${rect[1]}px`;
+      mark.style.width = `${width}px`;
+      mark.style.height = `${height}px`;
+      mark.title = `点击回看框选区域解释（第 ${entry.page} 页 · ${Math.round(width)}×${Math.round(height)} pt）`;
+      mark.dataset.entryId = entry.id;
+      mark.addEventListener('click', (ev) => {
+        ev.stopPropagation();
+        deps.onOpenEntry?.(entry);
+      });
+      page.marksLayer.appendChild(mark);
+      continue;
+    }
+
+    if (!entry.paraId || !page.data) continue;
     const para = paraById.get(entry.paraId);
     if (!para) continue;
     if ((para.page || entry.page) !== page.n) continue;
-    const boxes = markBoxes(para, wordsForPara(page, entry.paraId), entry.selText);
+    const boxes = markBoxes(para, wordsForPara(page, entry.paraId), entry.selText, entry.sent);
     for (const box of boxes) {
       const mark = document.createElement('button');
       mark.type = 'button';
@@ -527,6 +652,181 @@ function renderMarks(page) {
       page.marksLayer.appendChild(mark);
     }
   }
+}
+
+// ---------- Shift + 拖动框选区域 ----------
+
+function pageEntryFromElement(el) {
+  const pageEl = el?.closest?.('.page');
+  if (!pageEl) return null;
+  return pages.find((p) => p.page === pageEl) || null;
+}
+
+function regionLayerFor(pageEntry) {
+  let layer = pageEntry.page.querySelector('.region-layer');
+  if (!layer) {
+    layer = document.createElement('div');
+    layer.className = 'region-layer';
+    pageEntry.page.appendChild(layer);
+  }
+  return layer;
+}
+
+function drawRegionBox(pageEntry, rect, { tooSmall = false, active = false } = {}) {
+  const layer = regionLayerFor(pageEntry);
+  let box = layer.querySelector('.region-box');
+  if (!box) {
+    box = document.createElement('div');
+    box.className = 'region-box';
+    layer.appendChild(box);
+  }
+  box.style.left = `${rect[0]}px`;
+  box.style.top = `${rect[1]}px`;
+  box.style.width = `${Math.max(1, rect[2] - rect[0])}px`;
+  box.style.height = `${Math.max(1, rect[3] - rect[1])}px`;
+  box.classList.toggle('too-small', !!tooSmall);
+  box.classList.toggle('active', !!active);
+  return box;
+}
+
+function removeRegionLayer(pageEntry) {
+  const layer = pageEntry?.page?.querySelector('.region-layer');
+  if (layer) layer.remove();
+}
+
+function onPointerDown(event) {
+  // 只有 Shift + 左键才进入框选；普通拖动留给原生文字选择
+  if (!event.shiftKey || event.button !== 0) return;
+  const pageEntry = pageEntryFromElement(event.target);
+  if (!pageEntry) return;
+  event.preventDefault();
+  clearSelection();
+  if (region?.pageEntry) removeRegionLayer(region.pageEntry);
+  region = null;
+  deps.onRegionChange?.(null);
+  const start = clientToPdf(pageEntry.page, event.clientX, event.clientY, pageEntry.w, pageEntry.h);
+  regionDrag = { pageEntry, start, rect: [start.x, start.y, start.x, start.y], tooSmall: true };
+  drawRegionBox(pageEntry, regionDrag.rect, { tooSmall: true });
+  document.body.classList.add('region-dragging');
+  window.addEventListener('pointermove', onPointerMove, true);
+  window.addEventListener('pointerup', onPointerUp, true);
+  window.addEventListener('pointercancel', onPointerCancel, true);
+}
+
+function onPointerMove(event) {
+  if (!regionDrag) return;
+  event.preventDefault();
+  const { pageEntry, start } = regionDrag;
+  const current = clientToPdf(pageEntry.page, event.clientX, event.clientY, pageEntry.w, pageEntry.h);
+  const result = rectFromPoints(start, current);
+  regionDrag.rect = result.rect;
+  regionDrag.tooSmall = result.tooSmall;
+  drawRegionBox(pageEntry, result.rect, { tooSmall: result.tooSmall });
+}
+
+function onPointerUp(event) {
+  if (!regionDrag) return;
+  const { pageEntry, rect, tooSmall } = regionDrag;
+  const client = { x: event.clientX, y: event.clientY };
+  endRegionDrag();
+  if (tooSmall) {
+    removeRegionLayer(pageEntry);
+    region = null;
+    deps.onRegionChange?.(null);
+    return;
+  }
+  drawRegionBox(pageEntry, rect, { active: true });
+  region = { page: pageEntry.n, pageEntry, rect, client };
+  deps.onRegionChange?.(region);
+}
+
+function onPointerCancel() {
+  if (!regionDrag) return;
+  const pageEntry = regionDrag.pageEntry;
+  endRegionDrag();
+  removeRegionLayer(pageEntry);
+  region = null;
+  deps.onRegionChange?.(null);
+}
+
+function endRegionDrag() {
+  regionDrag = null;
+  if (typeof document !== 'undefined') document.body.classList.remove('region-dragging');
+  window.removeEventListener('pointermove', onPointerMove, true);
+  window.removeEventListener('pointerup', onPointerUp, true);
+  window.removeEventListener('pointercancel', onPointerCancel, true);
+}
+
+/** 取消当前框选（移除橡皮筋）。 */
+export function clearRegion() {
+  if (regionDrag) {
+    const pageEntry = regionDrag.pageEntry;
+    endRegionDrag();
+    removeRegionLayer(pageEntry);
+  }
+  if (region?.pageEntry) removeRegionLayer(region.pageEntry);
+  const had = !!region;
+  region = null;
+  if (had) deps.onRegionChange?.(null);
+}
+
+export function getRegion() {
+  return region ? { page: region.page, rect: [...region.rect], client: { ...region.client } } : null;
+}
+
+/** 画一个临时矩形并闪一下（历史回跳用）。 */
+export function flashRegion(pageN, rect) {
+  const pageEntry = pages.find((p) => p.n === Number(pageN));
+  const r = normalizeRegionRect(rect);
+  if (!pageEntry || !r) return false;
+  const box = drawRegionBox(pageEntry, r, { active: true });
+  box.classList.remove('pr-region-flash');
+  void box.offsetWidth;
+  box.classList.add('pr-region-flash');
+  setTimeout(() => {
+    box.remove();
+    const layer = pageEntry.page.querySelector('.region-layer');
+    if (layer && !layer.querySelector('.region-box')) layer.remove();
+  }, 1500);
+  return true;
+}
+
+/** 从页图裁剪框选区域生成 dataURL 缩略图（不上传图片）。 */
+export function regionThumbnail(pageN, rect) {
+  const pageEntry = pages.find((p) => p.n === Number(pageN));
+  const pageMeta = structure?.pages?.find((p) => p.n === Number(pageN));
+  const r = normalizeRegionRect(rect);
+  if (!pageEntry || !pageMeta || !r) return '';
+  const img = pageEntry.img;
+  if (!img || !img.naturalWidth || !img.naturalHeight) return '';
+  const crop = thumbnailCrop(r, pageMeta.w, pageMeta.h, img.naturalWidth, img.naturalHeight);
+  if (!crop) return '';
+  const maxWidth = 640;
+  const scale = Math.min(1, maxWidth / crop.sw);
+  const canvas = document.createElement('canvas');
+  canvas.width = Math.max(1, Math.round(crop.sw * scale));
+  canvas.height = Math.max(1, Math.round(crop.sh * scale));
+  const ctx = canvas.getContext('2d');
+  if (!ctx) return '';
+  ctx.imageSmoothingEnabled = true;
+  ctx.imageSmoothingQuality = 'high';
+  ctx.drawImage(img, crop.sx, crop.sy, crop.sw, crop.sh, 0, 0, canvas.width, canvas.height);
+  try {
+    return canvas.toDataURL('image/png');
+  } catch (err) {
+    return '';
+  }
+}
+
+/** 等页图加载完（历史回看其它页的区域缩略图时用）。 */
+export function ensurePageImage(pageN) {
+  const pageEntry = pages.find((p) => p.n === Number(pageN));
+  if (!pageEntry?.img) return Promise.resolve(false);
+  if (pageEntry.img.complete && pageEntry.img.naturalWidth) return Promise.resolve(true);
+  return new Promise((resolve) => {
+    pageEntry.img.addEventListener('load', () => resolve(true), { once: true });
+    pageEntry.img.addEventListener('error', () => resolve(false), { once: true });
+  });
 }
 
 // ---------- 选区 → 段落 ----------
@@ -714,6 +1014,58 @@ export function flashPara(paraId) {
     span.classList.add('pr-flash');
     setTimeout(() => span.classList.remove('pr-flash'), 1400);
   }
+}
+
+/** 在原文中查找术语首次出现：跳页 + 词级闪高亮（找不到词则闪整段）。 */
+export function jumpToTerm(term) {
+  const needle = String(term || '').trim().toLowerCase();
+  if (!needle) return false;
+  const paras = structure?.paras || [];
+  for (const para of paras) {
+    const at = String(para.text || '').toLowerCase().indexOf(needle);
+    if (at < 0) continue;
+    scrollToPage(para.page);
+    const page = pages.find((p) => p.n === para.page);
+    if (page && page.loadState !== 'loaded') {
+      pendingTerm = { para, start: at, end: at + needle.length };
+      loadPage(page).then(() => {
+        const pending = pendingTerm;
+        if (pending && pending.para.id === para.id) {
+          pendingTerm = null;
+          flashTermRange(pending.para, pending.start, pending.end);
+        }
+      });
+    } else {
+      flashTermRange(para, at, at + needle.length);
+    }
+    return true;
+  }
+  return false;
+}
+
+function flashTermRange(para, start, end) {
+  const page = pages.find((p) => p.n === para.page);
+  if (!page || page.loadState !== 'loaded') {
+    flashPara(para.id);
+    return;
+  }
+  const words = wordsForPara(page, para.id);
+  const aligned = alignWordOffsets(para.text, words);
+  const wanted = new Set();
+  for (let i = 0; i < words.length; i++) {
+    const range = aligned[i];
+    if (range && range[0] < end && range[1] > start) wanted.add(i);
+  }
+  let flashed = 0;
+  for (const span of page.textLayer.querySelectorAll('span[data-wi]')) {
+    if (!wanted.has(Number(span.dataset.wi))) continue;
+    span.classList.remove('pr-flash');
+    void span.offsetWidth;
+    span.classList.add('pr-flash');
+    flashed += 1;
+    setTimeout(() => span.classList.remove('pr-flash'), 1400);
+  }
+  if (!flashed) flashPara(para.id);
 }
 
 /** 当前滚动位置（供 ui-state 持久化）。 */

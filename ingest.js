@@ -82,14 +82,15 @@ export async function readJsonBody(req, limitBytes = 1024 * 1024) {
 }
 
 /**
- * 跑一次抽取脚本，解析 stdout 的一行 JSON 摘要。
- * @returns {Promise<{pageCount:number,paras:number,sections:number,words:number,warnings:string[]}>}
+ * 通用：跑一次 python 助手脚本，解析 stdout 最后一行的 JSON。
+ * 超时 / 非零退出 / 加密 / python 缺失都映射成带 code 的 PaperError。
+ * @param {{pythonPath:string,args:string[],timeoutMs:number,label:string}} options
  */
-export function runExtract({ pythonPath, pdfPath, outDir, timeoutMs = 120_000 }) {
+function runPythonJson({ pythonPath, args, timeoutMs = 120_000, label = '抽取' }) {
   return new Promise((resolve, reject) => {
     let child
     try {
-      child = spawn(pythonPath, [EXTRACT_SCRIPT, pdfPath, outDir], {
+      child = spawn(pythonPath, args, {
         stdio: ['ignore', 'pipe', 'pipe'],
       })
     } catch (error) {
@@ -130,7 +131,7 @@ export function runExtract({ pythonPath, pdfPath, outDir, timeoutMs = 120_000 })
       const stdoutText = Buffer.concat(stdout).toString('utf8').trim()
       const stderrText = Buffer.concat(stderr).toString('utf8').trim()
       if (timedOut) {
-        finish(reject, new PaperError('extract-failed', `抽取超时（${timeoutMs}ms），已终止`, 500))
+        finish(reject, new PaperError('extract-failed', `${label}超时（${timeoutMs}ms），已终止`, 500))
         return
       }
       let summary = null
@@ -148,9 +149,36 @@ export function runExtract({ pythonPath, pdfPath, outDir, timeoutMs = 120_000 })
         finish(reject, new PaperError('encrypted', summary.message || '这是加密 PDF，无法抽取文字', 422))
         return
       }
-      const detail = summary?.message || tail || `抽取脚本退出码 ${code}`
-      finish(reject, new PaperError('extract-failed', `抽取失败：${detail}`, 500))
+      const detail = summary?.message || tail || `脚本退出码 ${code}`
+      finish(reject, new PaperError('extract-failed', `${label}失败：${detail}`, 500))
     })
+  })
+}
+
+/**
+ * 全量抽取：extract.py <pdf> <outDir>。
+ * @returns {Promise<{pageCount:number,paras:number,sections:number,words:number,warnings:string[]}>}
+ */
+export function runExtract({ pythonPath, pdfPath, outDir, timeoutMs = 120_000 }) {
+  return runPythonJson({
+    pythonPath,
+    args: [EXTRACT_SCRIPT, pdfPath, outDir],
+    timeoutMs,
+    label: '抽取',
+  })
+}
+
+/**
+ * 框选区域文字层：extract.py --region <pdf> <page> <x0,y0,x1,y1>（一次性子进程，无守护）。
+ * @returns {Promise<{page:number,rect:number[],hasText:boolean,text:string}>}
+ */
+export function extractRegion({ pythonPath, pdfPath, page, rect, timeoutMs = 120_000 }) {
+  const rectArg = (Array.isArray(rect) ? rect : []).map(value => Number(value)).join(',')
+  return runPythonJson({
+    pythonPath: pythonPath || 'python3',
+    args: [EXTRACT_SCRIPT, '--region', pdfPath, String(page), rectArg],
+    timeoutMs,
+    label: '区域抽取',
   })
 }
 

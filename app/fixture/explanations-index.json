@@ -8,7 +8,12 @@
    "selText": "Attention mechanisms have become an integral part of compelling sequence modeling and transduction models in various tasks.",
    "createdAt": "2026-10-22T07:30:00.000Z",
    "hitCount": 2,
-   "recipe": "v1"
+   "recipe": "v1",
+   "kind": "explain",
+   "sent": [
+    0,
+    123
+   ]
   },
   {
    "id": "e_fixture02",
@@ -16,9 +21,61 @@
    "paraId": "p5",
    "page": 2,
    "selText": "The encoder is composed of a stack of six identical layers, each with two sub-layers.",
-   "createdAt": "2026-10-22T07:50:00.000Z",
+   "createdAt": "2026-10-22T07:40:00.000Z",
    "hitCount": 0,
-   "recipe": "v1"
+   "recipe": "v2",
+   "kind": "explain",
+   "sent": [
+    0,
+    85
+   ]
+  },
+  {
+   "id": "e_translate01",
+   "key": "k555555555555555555555555555555555555555555555555555555555555555",
+   "paraId": "p2",
+   "page": 1,
+   "selText": "The Transformer follows this overall architecture using stacked self-attention and point-wise, fully connected layers for both the encoder and decoder.",
+   "createdAt": "2026-10-22T07:45:00.000Z",
+   "hitCount": 1,
+   "recipe": "translate-v1",
+   "kind": "translate"
+  },
+  {
+   "id": "e_region01",
+   "key": "k777777777777777777777777777777777777777777777777777777777777777",
+   "paraId": "p3",
+   "page": 1,
+   "selText": "",
+   "createdAt": "2026-10-22T07:50:00.000Z",
+   "hitCount": 1,
+   "recipe": "region-v1",
+   "kind": "region",
+   "rect": [
+    322,
+    68,
+    558,
+    124
+   ],
+   "regionText": "We employ a residual connection around each of the two sub-layers, followed by layer normalization."
+  },
+  {
+   "id": "e_region02",
+   "key": "k999999999999999999999999999999999999999999999999999999999999999",
+   "paraId": "p5",
+   "page": 2,
+   "selText": "",
+   "createdAt": "2026-10-22T07:55:00.000Z",
+   "hitCount": 0,
+   "recipe": "region-v1",
+   "kind": "region",
+   "rect": [
+    54,
+    66,
+    558,
+    110
+   ],
+   "regionText": "The encoder is composed of a stack of six identical layers, each with two sub-layers."
   }
  ]
 }

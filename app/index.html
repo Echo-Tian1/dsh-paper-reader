@@ -16,6 +16,7 @@
         <span id="doc-title" class="doc-title">未打开论文</span>
       </div>
       <div class="topbar-right">
+        <span class="region-shortcut" title="选中文字解释；Shift + 拖动框选公式 / 图区域">Shift+拖动 框选</span>
         <span id="page-indicator" class="page-indicator" title="当前页 / 总页数" hidden>1 / 1</span>
         <label class="select-wrap" title="最近论文">
           <select id="docs-select" class="docs-select" aria-label="最近论文" hidden></select>
@@ -43,7 +44,7 @@
             <h2>把论文拖进来</h2>
             <p class="empty-sub">支持带文字层的 PDF（中 / 英），按原版面渲染，可选中、可解释。</p>
             <button id="empty-upload" class="btn btn-primary" type="button">选择 PDF 文件</button>
-            <p class="empty-hint">也可以把 PDF 路径发给我，我帮你打开。</p>
+            <p class="empty-hint">选中句子可解释；Shift + 拖动可框选公式 / 图区域；选中后可「译本段」。</p>
             <div class="empty-recent">
               <h3>最近论文</h3>
               <ul id="recent-list" class="recent-list"></ul>
@@ -65,6 +66,7 @@
           <div class="tabs" role="tablist">
             <button id="tab-current" class="tab active" type="button" role="tab" aria-selected="true">当前句</button>
             <button id="tab-history" class="tab" type="button" role="tab" aria-selected="false">历史</button>
+            <button id="tab-terms" class="tab" type="button" role="tab" aria-selected="false">术语</button>
           </div>
           <button id="pane-close" class="icon-btn" type="button" aria-label="收起解释栏">×</button>
         </div>
@@ -76,6 +78,14 @@
         <div id="pane-history" class="pane-body" hidden>
           <div id="history-list" class="history-list"></div>
         </div>
+
+        <div id="pane-terms" class="pane-body" hidden>
+          <div class="terms-head">
+            <span class="terms-head-title">本论文术语表</span>
+            <a id="terms-export" class="btn btn-ghost" href="#" download hidden>导出 .md</a>
+          </div>
+          <div id="terms-list" class="terms-list"></div>
+        </div>
       </aside>
     </main>
 
@@ -84,8 +94,15 @@
 
   <div id="selection-toolbar" class="selection-toolbar" hidden>
     <button class="tb-btn tb-primary" type="button" data-act="explain">解释</button>
+    <button class="tb-btn" type="button" data-act="translate">译本段</button>
     <button class="tb-btn" type="button" data-act="copy">复制</button>
     <button class="tb-btn tb-cancel" type="button" data-act="cancel">取消</button>
+  </div>
+
+  <div id="region-toolbar" class="selection-toolbar region-toolbar" hidden>
+    <span class="tb-hint">框选区域</span>
+    <button class="tb-btn tb-primary" type="button" data-region-act="explain">解释这块</button>
+    <button class="tb-btn tb-cancel" type="button" data-region-act="cancel">取消</button>
   </div>
 
   <div id="toast" class="toast" hidden></div>
