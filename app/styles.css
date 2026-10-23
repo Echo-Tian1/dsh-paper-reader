@@ -360,10 +360,11 @@ button { font-family: inherit; }
 
 /* ---------- 解释栏 ---------- */
 .explain-pane {
-  flex: 0 0 var(--pr-pane-w);
+  /* 宽度自适应：默认 420px，坞很窄时最多占 46%，但永远由用户决定收不收 */
+  flex: 0 0 min(var(--pr-pane-w), 46%);
   width: var(--pr-pane-w);
-  min-width: 280px;
-  max-width: 65%;
+  min-width: 260px;
+  max-width: 46%;
   display: flex;
   flex-direction: column;
   min-height: 0;

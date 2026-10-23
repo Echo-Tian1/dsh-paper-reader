@@ -212,6 +212,7 @@ async function main() {
   cacheEls();
   wireEvents();
   wireDiagnostics();
+  restorePaneState();
   updateNarrow();
 
   bridge.initBridge({ onTheme: handleHostTheme, onChatAck: handleChatAck });
@@ -269,8 +270,7 @@ async function main() {
         }
       }
       explain.openEntry(full);
-      if (state.narrow) openPane();
-      else setCollapsed(false);
+      setCollapsed(false);
     },
     onPageChange: handlePageChange,
     onRegionChange: handleRegionChange,
@@ -364,11 +364,8 @@ function wireEvents() {
   });
 
   els.paneToggle.addEventListener('click', togglePane);
-  els.paneClose.addEventListener('click', () => {
-    if (state.narrow) closePane();
-    else setCollapsed(true);
-  });
-  els.drawerBackdrop.addEventListener('click', closePane);
+  // 解释栏的收/开只由用户自己决定，宽度变化不会自动收起
+  els.paneClose.addEventListener('click', () => setCollapsed(true));
 
   const toolbar = els.selectionToolbar;
   toolbar.addEventListener('mousedown', (event) => event.preventDefault()); // 保住选区
@@ -410,7 +407,6 @@ function wireEvents() {
     if (event.key === 'Escape') {
       hideToolbar();
       if (pendingRegion) cancelRegion();
-      if (state.narrow && state.paneOpen) closePane();
     }
   });
 }
@@ -536,7 +532,6 @@ async function openDoc(docId, { restoreScrollTop = null } = {}) {
 
     state.ui = { ...state.ui, lastDocId: docId };
     persistUi();
-    closePane();
   } catch (err) {
     showError(`打开论文失败：${err.message || err}`, { retry: () => openDoc(docId) });
   } finally {
@@ -687,8 +682,7 @@ function runExplain(info) {
   if (!info || !info.text || !state.doc) return;
   hideToolbar();
   explain.explainSelection({ page: info.page, paraId: info.paraId, text: info.text });
-  if (state.narrow) openPane();
-  else setCollapsed(false);
+  setCollapsed(false);
 }
 
 function runTranslate(info) {
@@ -703,8 +697,7 @@ function runTranslate(info) {
     paraText: ctx.paraText,
     sectionTitle: ctx.sectionTitle,
   });
-  if (state.narrow) openPane();
-  else setCollapsed(false);
+  setCollapsed(false);
 }
 
 async function copyText(text) {
@@ -772,59 +765,52 @@ function cancelRegion() {
 function runRegionExplain(region) {
   if (!state.doc) return;
   explain.explainRegion({ page: region.page, rect: region.rect });
-  if (state.narrow) openPane();
-  else setCollapsed(false);
+  setCollapsed(false);
 }
 
 // ---------- 窄态抽屉 ----------
 
+/**
+ * 解释栏的显示状态完全由用户控制（点 × 收起，点左上「解」展开），宽度变化不会自动收起/展开。
+ * 这里保留函数名供 resize / 主题回调调用，只做与窄态无关的同步。
+ */
 function updateNarrow() {
-  const narrow = window.innerWidth < 980;
-  state.narrow = narrow;
-  appEl.classList.toggle('narrow', narrow);
-  if (narrow) setCollapsed(false);
-  if (!narrow) closePane();
+  state.narrow = false;
+  appEl.classList.remove('narrow');
   syncPaneButtons();
   updatePageIndicator();
 }
 
-/** 宽态下收起/展开解释栏（窄态用覆盖抽屉）。 */
+const LS_PANE_COLLAPSED = 'pr.pane.collapsed';
+
+/** 用户手动收起/展开解释栏（持久化，重开也保持你的选择）。 */
 function setCollapsed(collapsed) {
   state.paneCollapsed = !!collapsed;
   appEl.classList.toggle('pane-collapsed', state.paneCollapsed);
+  try { window.localStorage.setItem(LS_PANE_COLLAPSED, state.paneCollapsed ? '1' : '0'); } catch (err) { /* 隐私模式 */ }
+  syncPaneButtons();
+}
+
+function restorePaneState() {
+  let collapsed = false;
+  try { collapsed = window.localStorage.getItem(LS_PANE_COLLAPSED) === '1'; } catch (err) { /* ignore */ }
+  state.paneCollapsed = collapsed;
+  appEl.classList.toggle('pane-collapsed', collapsed);
   syncPaneButtons();
 }
 
 function syncPaneButtons() {
   if (els.paneToggle) {
-    els.paneToggle.hidden = !(state.narrow || state.paneCollapsed);
-    els.paneToggle.title = '打开解释栏';
+    els.paneToggle.hidden = !state.paneCollapsed;
+    els.paneToggle.title = '展开解释栏';
   }
   if (els.paneClose) {
     els.paneClose.hidden = false;
-    els.paneClose.title = state.narrow ? '收起解释栏' : '收起解释栏';
+    els.paneClose.title = '收起解释栏';
   }
-}
-
-function openPane() {
-  if (!state.narrow) return;
-  state.paneOpen = true;
-  appEl.classList.add('pane-open');
-  els.drawerBackdrop.hidden = false;
-}
-
-function closePane() {
-  state.paneOpen = false;
-  appEl.classList.remove('pane-open');
-  if (els.drawerBackdrop) els.drawerBackdrop.hidden = true;
 }
 
 function togglePane() {
-  if (state.narrow) {
-    if (state.paneOpen) closePane();
-    else openPane();
-    return;
-  }
   setCollapsed(!state.paneCollapsed);
 }
 
